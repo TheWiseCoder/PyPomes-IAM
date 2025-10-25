@@ -23,7 +23,7 @@ _provider_registry: dict[str, dict[str, Any]] = {}
 
 
 def provider_register(provider_id: str,
-                      access_url: str,
+                      auth_url: str,
                       auth_user: str,
                       auth_pwd: str,
                       custom_auth: tuple[str, str] = None,
@@ -41,7 +41,7 @@ def provider_register(provider_id: str,
     (such as ['grant_type', 'client_credentials']), to be added to the request body, may be specified in *body_data*.
 
     :param provider_id: the provider's identification
-    :param access_url: the url to request authentication tokens with
+    :param auth_url: the url to request authentication tokens with
     :param auth_user: the basic authorization user
     :param auth_pwd: the basic authorization password
     :param custom_auth: optional key names for sending the credentials as key-value pairs in the body of the request
@@ -49,8 +49,9 @@ def provider_register(provider_id: str,
     :param body_data: optional key-value pairs to be added to the request body
     """
     global _provider_registry  # noqa: PLW0602
+
     _provider_registry[provider_id] = {
-        "url": access_url,
+        "url": auth_url,
         "user": auth_user,
         "pwd": auth_pwd,
         "custom-auth": custom_auth,
@@ -71,10 +72,11 @@ def provider_get_token(provider_id: str,
     :param errors: incidental error messages
     :param logger: optional logger
     """
+    global _provider_registry  # noqa: PLW0602
+
     # initialize the return variable
     result: str | None = None
 
-    global _provider_registry  # noqa: PLW0602
     err_msg: str | None = None
     provider: dict[str, Any] = _provider_registry.get(provider_id)
     if provider:

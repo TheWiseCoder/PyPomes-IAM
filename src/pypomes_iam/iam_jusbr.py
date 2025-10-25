@@ -64,17 +64,17 @@ _jusbr_registry: dict[str, Any] = {
 _logger: Logger | None = None
 
 
-def jusbr_config(flask_app: Flask,
-                 client_id: str = JUSBR_CLIENT_ID,
-                 client_secret: str = JUSBR_CLIENT_SECRET,
-                 login_timeout: int = JUSBR_LOGIN_TIMEOUT,
-                 callback_endpoint: str = JUSBR_CALLBACK_ENDPOINT,
-                 token_endpoint: str = JUSBR_TOKEN_ENDPOINT,
-                 login_endpoint: str = JUSBR_LOGIN_ENDPOINT,
-                 logout_endpoint: str = JUSBR_LOGOUT_ENDPOINT,
-                 auth_url: str = JUSBR_AUTH_URL,
-                 token_url: str = JUSBR_TOKEN_URL,
-                 logger: Logger = None) -> None:
+def jusbr_setup(flask_app: Flask,
+                client_id: str = JUSBR_CLIENT_ID,
+                client_secret: str = JUSBR_CLIENT_SECRET,
+                login_timeout: int = JUSBR_LOGIN_TIMEOUT,
+                callback_endpoint: str = JUSBR_CALLBACK_ENDPOINT,
+                token_endpoint: str = JUSBR_TOKEN_ENDPOINT,
+                login_endpoint: str = JUSBR_LOGIN_ENDPOINT,
+                logout_endpoint: str = JUSBR_LOGOUT_ENDPOINT,
+                auth_url: str = JUSBR_AUTH_URL,
+                token_url: str = JUSBR_TOKEN_URL,
+                logger: Logger = None) -> None:
     """
     Configure the JusBR IAM.
 
