@@ -1,0 +1,385 @@
+import requests
+import secrets
+import string
+import sys
+from cachetools import Cache, FIFOCache, TTLCache
+from datetime import datetime
+from flask import Flask, Response, redirect, request, jsonify
+from logging import Logger
+from pypomes_core import (
+    APP_PREFIX, TZ_LOCAL, env_get_int, env_get_str, exc_format
+)
+from typing import Any, Final
+
+JUSBR_CLIENT_ID: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CLIENT_ID")
+JUSBR_CLIENT_SECRET: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CLIENT_SECRET")
+JUSBR_LOGIN_TIMEOUT: Final[int] = env_get_int(key=f"{APP_PREFIX}_JUSBR_LOGIN_TIMEOUT")
+JUSBR_CALLBACK_ENDPOINT: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CALLBACK_ENDPOINT",
+                                                  def_value="/iam/jusbr:callback")
+JUSBR_TOKEN_ENDPOINT: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_TOKEN_ENDPOINT",
+                                               def_value="/iam/jusbr:get-token")
+JUSBR_LOGIN_ENDPOINT: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_LOGIN_ENDPOINT",
+                                               def_value="/iam/jusbr:login")
+JUSBR_LOGOUT_ENDPOINT: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_LOGOUT_ENDPOINT",
+                                                def_value="/iam/jusbr:logout")
+JUSBR_AUTH_URL: Final[str] = env_get_str(
+    key=f"{APP_PREFIX}JUSBR_AUTH_URL",
+    def_value="https://sso.stg.cloud.pje.jus.br/auth/realms/pje/protocol/openid-connect/auth"
+)
+JUSBR_TOKEN_URL: Final[str] = env_get_str(
+    key=f"{APP_PREFIX}JUSBR_TOKEN_URL",
+    def_value="https://sso.stg.cloud.pje.jus.br/auth/realms/pje/protocol/openid-connect/token"
+)
+JUSBR_CALLBACK_URL: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CALLBACK_URL")
+
+# safe memory cache - structure:
+# {
+#    "client-id": <str>,
+#    "client-secret": <str>,
+#    "auth-url": <str>,
+#    "token-url": <str>,
+#    "login-timeout": <int>,
+#    "users": [
+#       "<user-id>": {
+#         "cache-obj": <Cache>,
+#         "oauth-scope": <str>,
+#         "access-expiration": <timestamp>,
+#         data in <TTLCache>:
+#           "oauth-state": <str>
+#           "access-token": <str>
+#           "refresh-token": <str>
+#       }
+#    ]
+# }
+_jusbr_registry: dict[str, Any] = {
+    "client-id": None,
+    "client-secret": None,
+    "login-timeout": None,
+    "auth-url": None,
+    "token-url": None,
+    "users": []
+}
+
+# dafault logger
+_logger: Logger | None = None
+
+
+def jusbr_config(flask_app: Flask,
+                 client_id: str = JUSBR_CLIENT_ID,
+                 client_secret: str = JUSBR_CLIENT_SECRET,
+                 login_timeout: int = JUSBR_LOGIN_TIMEOUT,
+                 callback_endpoint: str = JUSBR_CALLBACK_ENDPOINT,
+                 token_endpoint: str = JUSBR_TOKEN_ENDPOINT,
+                 login_endpoint: str = JUSBR_LOGIN_ENDPOINT,
+                 logout_endpoint: str = JUSBR_LOGOUT_ENDPOINT,
+                 auth_url: str = JUSBR_AUTH_URL,
+                 token_url: str = JUSBR_TOKEN_URL,
+                 logger: Logger = None) -> None:
+    """
+    Configure the JusBR IAM.
+
+    This should be invoked only once, before the first access to a JusBR service.
+
+    :param flask_app: the Flask application
+    :param client_id: the client's identification with JusBR
+    :param client_secret: the client's password with JusBR
+    :param login_timeout: timeout for login authentication (in seconds,defaults to no timeout)
+    :param callback_endpoint: endpoint for the callback from JusBR
+    :param token_endpoint: endpoint for retrieving the JusBR authentication token
+    :param login_endpoint: endpoint for redirecting user to JusBR login page
+    :param logout_endpoint: endpoint for terminating user access to JusBR
+    :param auth_url: URL to access the JusBR login page
+    :param token_url: URL for obtaing or refreshing the token
+    :param logger: optional logger
+    """
+    # establish the logger
+    global _logger
+    _logger = logger
+
+    # configure the JusBR registry
+    global _jusbr_registry  # noqa: PLW0602
+    _jusbr_registry.update({
+        "client-id": client_id,
+        "client-secret": client_secret,
+        "login-timeout": login_timeout,
+        "auth-url": auth_url,
+        "token-url": token_url
+    })
+
+    # establish the endpoints
+    if token_endpoint:
+        flask_app.add_url_rule(rule=token_endpoint,
+                               endpoint="jusbr-token",
+                               view_func=jusbr_token,
+                               methods=["GET"])
+    if login_endpoint:
+        flask_app.add_url_rule(rule=login_endpoint,
+                               endpoint="jusbr-login",
+                               view_func=jusbr_login,
+                               methods=["GET"])
+    if logout_endpoint:
+        flask_app.add_url_rule(rule=logout_endpoint,
+                               endpoint="jusbr-logout",
+                               view_func=jusbr_logout,
+                               methods=["GET"])
+    if callback_endpoint:
+        flask_app.add_url_rule(rule=callback_endpoint,
+                               endpoint="jusbr-callback",
+                               view_func=jusbr_callback,
+                               methods=["POST"])
+
+
+# @flask_app.route(rule=<login_endpoint>,  # JUSBR_LOGIN_ENDPOINT: /iam/jusbr:login
+#                  methods=["GET"])
+def jusbr_login() -> Response:
+    """
+    Entry point for the JusBR login service.
+
+    Redirect the request to the JusBR authentication page, with the apprpriate parameters.
+
+    :return: the response from the redirect operation
+    """
+    # retrieve user id
+    input_params: dict[str, Any] = request.values
+    user_id: str = input_params.get("user-id") or input_params.get("login")
+
+    # retrieve user data
+    global _jusbr_registry
+    user_data: dict[str, Any] = _jusbr_registry["users"].get(user_id)
+    if not user_data:
+        user_data = {"access-expiration": int(datetime.now(tz=TZ_LOCAL).timestamp())}
+        _jusbr_registry["users"][user_id] = user_data
+
+    # build redirect url
+    oauth_state: str = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
+    login_timeout: int = _jusbr_registry.get("login-timeout")
+    safe_cache: Cache
+    if isinstance(login_timeout, int) and login_timeout > 0:
+        safe_cache = TTLCache(maxsize=16,
+                              ttl=600)
+    else:
+        safe_cache = FIFOCache(maxsize=16)
+    safe_cache["oauth-state"] = oauth_state
+    user_data["cache-obj"] = safe_cache
+    auth_url: str = (f"{_jusbr_registry["auth-url"]}?response_type=code"
+                     f"&client_id={_jusbr_registry["client-id"]}"
+                     f"&redirect_url={_jusbr_registry["redirect-url"]}"
+                     f"&state={oauth_state}")
+    if user_data.get("oauth-scope"):
+        auth_url += f"&scope={user_data.get("oauth-scope")}"
+
+    # redirect request
+    return redirect(location=auth_url)
+
+
+# @flask_app.route(rule=<login_endpoint>,  # JUSBR_LOGIN_ENDPOINT: /iam/jusbr:logout
+#                  methods=["GET"])
+def jusbr_logout() -> Response:
+    """
+    Entry point for the JusBR logout service.
+
+    Delete all data associating the user with JusBR.
+
+    :return: the response from the redirect operation
+    """
+    # retrieve user id
+    input_params: dict[str, Any] = request.values
+    user_id: str = input_params.get("user-id") or input_params.get("login")
+
+    # retrieve user data
+    global _jusbr_registry
+    if user_id in _jusbr_registry.get("users"):
+        _jusbr_registry.pop(user_id)
+        logger: Logger = _jusbr_registry.get("logger")
+        if logger:
+            logger.debug(f"User '{user_id}' removed from the registry")
+
+    return Response(status=200)
+
+
+# @flask_app.route(rule=<callback_endpoint>,  # JUSBR_CALLBACK_ENDPOINT: /iam/jusbr:callback
+#                  methods=["POST"])
+def jusbr_callback() -> Response:
+    """
+    Entry point for the callback from JusBR on authentication.
+
+    :return: the response containing the token, or *NOT AUTHORIZED*
+    """
+    global _jusbr_registry
+
+    # validate the OAuth2 state
+    oauth_state: str = request.args.get("state")
+    user_data: dict[str, Any] | None = None
+    if oauth_state:
+        for user in _jusbr_registry.get("users"):
+            safe_cache: Cache = user_data.get("cache-obj")
+            if safe_cache and oauth_state == safe_cache.get("oauth-state"):
+                user_data = user
+                # 'oauth-state' is to be used only once
+                safe_cache["oauth-state"] = None
+                break
+
+    # exchange 'code' for the token
+    errors: list[str] = []
+    if user_data:
+        code: str = request.args.get("code")
+        body_data: dict[str, Any] = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirec_url": _jusbr_registry.get("redirect-url"),
+        }
+        __post_jusbr(user_data=user_data,
+                     body_data=body_data,
+                     errors=errors,
+                     logger=_jusbr_registry.get("logger"))
+    else:
+        # login operation timed-out
+        errors.append("Operation timeout")
+
+    result: Response
+    if errors:
+        result = jsonify({"errors": "; ".join(errors)})
+        result.status_code = 400
+    else:
+        result = Response(status=200)
+
+    return result
+
+
+# @flask_app.route(rule=<token_endpoint>,  # JUSBR_TOKEN_ENDPOINT: /iam/jusbr:get-token
+#                  methods=["GET"])
+def jusbr_token() -> Response:
+    """
+    Entry point for retrieving the JusBR token.
+
+    :return: the response containing the token, or *NOT AUTHORIZED*
+    """
+    # retrieve user id
+    input_params: dict[str, Any] = request.values
+    user_id: str = input_params.get("user-id") or input_params.get("login")
+
+    # retrieve the token
+    token: str = jusbr_get_token(user_id=user_id,
+                                 logger=_jusbr_registry.get("logger"))
+    result: Response
+    if token:
+        result = jsonify({"token": token})
+    else:
+        result = Response(status=401)
+
+    return result
+
+
+def jusbr_get_token(user_id: str,
+                    errors: list[str] = None,
+                    logger: Logger = None) -> str:
+    """
+    Retrieve the authentication token for user *user_id*.
+
+    :param user_id: the user's identification
+    :param errors: incidental error messages
+    :param logger: optional logger
+    """
+    global _jusbr_registry
+
+    # initialize the return variable
+    result: str | None = None
+
+    user_data: dict[str, Any] = _jusbr_registry["users"].get(user_id)
+    safe_cache: Cache = user_data["cache-obj"] if user_data else None
+    if user_data and safe_cache:
+        access_expiration: int = user_data.get("access-expiration")
+        now: int = int(datetime.now(tz=TZ_LOCAL).timestamp())
+        if now < access_expiration:
+            result = safe_cache.get("access-token")
+        else:
+            # access token has expired
+            safe_cache["access-token"] = None
+            refresh_token: str = safe_cache.get("refresh-token")
+            if refresh_token:
+                body_data: dict[str, str] = {
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token
+                }
+                __post_jusbr(user_data=user_data,
+                             body_data=body_data,
+                             errors=errors,
+                             logger=logger)
+                if not errors:
+                    result = safe_cache.get("access_token")
+
+    elif logger or isinstance(errors, list):
+        err_msg: str = f"User '{user_id}' not authenticated with JusBR"
+        if isinstance(errors, list):
+            errors.append(err_msg)
+        if logger:
+            logger.error(msg=err_msg)
+
+    return result
+
+
+def __post_jusbr(user_data: dict[str, Any],
+                 body_data: dict[str, Any],
+                 errors: list[str] | None,
+                 logger: Logger | None) -> None:
+    """
+    Send a POST request to JusBR to obtain the authorization token.
+
+    If successful, the token data is stored in the registry, and the token itself is returned.
+    Otherwise, *errors* will contain the appropriate error message.
+
+    :param user_data: the user data in the registry
+    :param body_data: the data to send in the body of the request
+    :param errors: incidental errors
+    :param logger: optional logger
+    """
+    global _jusbr_registry
+
+    # complete the data to send in body of request
+    body_data["client_id"] = _jusbr_registry.get("client-id")
+    client_secret: str = _jusbr_registry.get("client-secret")
+    if client_secret:
+        body_data["client_secret"] = client_secret
+
+    err_msg: str | None = None
+    safe_cache: Cache = user_data.get("cache-obj")
+    url: str = _jusbr_registry.get("auth-url")
+    now: int = int(datetime.now(tz=TZ_LOCAL).timestamp())
+    try:
+        # JusBR return on a token request:
+        # {
+        #   "token_type": "Bearer",
+        #   "access_token": <str>,
+        #   "expires_in": <number-of-seconds>,
+        #   "refresh_token": <str>,
+        # }
+        response: requests.Response = requests.post(url=url,
+                                                    data=body_data)
+        if response.status_code < 200 or response.status_code >= 300:
+            # request resulted in error, report the problem
+            err_msg = (f"POST '{url}': failed, "
+                       f"status {response.status_code}, reason '{response.reason}'")
+            if response.status_code == 401 and "refresh_token" in body_data:
+                # refresh token is no longer valid
+                safe_cache["refresh-token"] = None
+        else:
+            reply: dict[str, Any] = response.json()
+            result = reply.get("access_token")
+            safe_cache: Cache = FIFOCache(maxsize=1024)
+            safe_cache["access-token"] = result
+            safe_cache["refresh-token"] = reply.get("refresh_token")
+            user_data["cache-obj"] = safe_cache
+            user_data["access-expiration"] = now + reply.get("expires_in")
+            if logger:
+                logger.debug(msg=f"POST '{url}': status {response.status_code}")
+    except Exception as e:
+        # the operation raised an exception
+        err_msg = exc_format(exc=e,
+                             exc_info=sys.exc_info())
+        err_msg = f"POST '{url}': error, '{err_msg}'"
+
+    if err_msg:
+        if isinstance(errors, list):
+            errors.append(err_msg)
+        if logger:
+            logger.error(msg=err_msg)
