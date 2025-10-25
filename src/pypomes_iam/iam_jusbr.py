@@ -110,28 +110,28 @@ def jusbr_setup(flask_app: Flask,
     if token_endpoint:
         flask_app.add_url_rule(rule=token_endpoint,
                                endpoint="jusbr-token",
-                               view_func=jusbr_token,
+                               view_func=service_token,
                                methods=["GET"])
     if login_endpoint:
         flask_app.add_url_rule(rule=login_endpoint,
                                endpoint="jusbr-login",
-                               view_func=jusbr_login,
+                               view_func=service_login,
                                methods=["GET"])
     if logout_endpoint:
         flask_app.add_url_rule(rule=logout_endpoint,
                                endpoint="jusbr-logout",
-                               view_func=jusbr_logout,
+                               view_func=service_logout,
                                methods=["GET"])
     if callback_endpoint:
         flask_app.add_url_rule(rule=callback_endpoint,
                                endpoint="jusbr-callback",
-                               view_func=jusbr_callback,
+                               view_func=service_callback,
                                methods=["POST"])
 
 
 # @flask_app.route(rule=<login_endpoint>,  # JUSBR_LOGIN_ENDPOINT: /iam/jusbr:login
 #                  methods=["GET"])
-def jusbr_login() -> Response:
+def service_login() -> Response:
     """
     Entry point for the JusBR login service.
 
@@ -139,22 +139,20 @@ def jusbr_login() -> Response:
 
     :return: the response from the redirect operation
     """
+    global _jusbr_registry
+
     # retrieve user id
     input_params: dict[str, Any] = request.values
     user_id: str = input_params.get("user-id") or input_params.get("login")
 
     # retrieve user data
-    global _jusbr_registry
-    user_data: dict[str, Any] = _jusbr_registry["users"].get(user_id)
-    if not user_data:
-        user_data = {"access-expiration": int(datetime.now(tz=TZ_LOCAL).timestamp())}
-        _jusbr_registry["users"][user_id] = user_data
-
+    user_data: dict[str, Any] = __get_user_data(user_id=user_id,
+                                                logger=_logger)
     # build redirect url
     oauth_state: str = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
-    login_timeout: int = _jusbr_registry.get("login-timeout")
+    timeout: int = __get_login_timeout()
     safe_cache: Cache
-    if isinstance(login_timeout, int) and login_timeout > 0:
+    if timeout:
         safe_cache = TTLCache(maxsize=16,
                               ttl=600)
     else:
@@ -174,32 +172,32 @@ def jusbr_login() -> Response:
 
 # @flask_app.route(rule=<login_endpoint>,  # JUSBR_LOGIN_ENDPOINT: /iam/jusbr:logout
 #                  methods=["GET"])
-def jusbr_logout() -> Response:
+def service_logout() -> Response:
     """
     Entry point for the JusBR logout service.
 
-    Delete all data associating the user with JusBR.
+    Remove all data associating the user with JusBR from the registry.
 
     :return: the response from the redirect operation
     """
+    global _jusbr_registry
+
     # retrieve user id
     input_params: dict[str, Any] = request.values
     user_id: str = input_params.get("user-id") or input_params.get("login")
 
-    # retrieve user data
-    global _jusbr_registry
+    # remove user data
     if user_id in _jusbr_registry.get("users"):
         _jusbr_registry.pop(user_id)
-        logger: Logger = _jusbr_registry.get("logger")
-        if logger:
-            logger.debug(f"User '{user_id}' removed from the registry")
+        if _logger:
+            _logger.debug(f"User '{user_id}' removed from the registry")
 
     return Response(status=200)
 
 
 # @flask_app.route(rule=<callback_endpoint>,  # JUSBR_CALLBACK_ENDPOINT: /iam/jusbr:callback
 #                  methods=["POST"])
-def jusbr_callback() -> Response:
+def service_callback() -> Response:
     """
     Entry point for the callback from JusBR on authentication.
 
@@ -211,10 +209,10 @@ def jusbr_callback() -> Response:
     oauth_state: str = request.args.get("state")
     user_data: dict[str, Any] | None = None
     if oauth_state:
-        for user in _jusbr_registry.get("users"):
+        for data in _jusbr_registry.get("users"):
             safe_cache: Cache = user_data.get("cache-obj")
             if safe_cache and oauth_state == safe_cache.get("oauth-state"):
-                user_data = user
+                user_data = data
                 # 'oauth-state' is to be used only once
                 safe_cache["oauth-state"] = None
                 break
@@ -231,10 +229,12 @@ def jusbr_callback() -> Response:
         __post_jusbr(user_data=user_data,
                      body_data=body_data,
                      errors=errors,
-                     logger=_jusbr_registry.get("logger"))
+                     logger=_logger)
     else:
-        # login operation timed-out
-        errors.append("Operation timeout")
+        msg: str = "Unknown OAuth2 code received"
+        if __get_login_timeout():
+            msg += " - possible operation timeout"
+        errors.append(msg)
 
     result: Response
     if errors:
@@ -248,7 +248,7 @@ def jusbr_callback() -> Response:
 
 # @flask_app.route(rule=<token_endpoint>,  # JUSBR_TOKEN_ENDPOINT: /iam/jusbr:get-token
 #                  methods=["GET"])
-def jusbr_token() -> Response:
+def service_token() -> Response:
     """
     Entry point for retrieving the JusBR token.
 
@@ -260,7 +260,7 @@ def jusbr_token() -> Response:
 
     # retrieve the token
     token: str = jusbr_get_token(user_id=user_id,
-                                 logger=_jusbr_registry.get("logger"))
+                                 logger=_logger)
     result: Response
     if token:
         result = jsonify({"token": token})
@@ -318,6 +318,62 @@ def jusbr_get_token(user_id: str,
     return result
 
 
+def jusbr_set_scope(user_id: str,
+                    scope: str,
+                    logger: Logger | None) -> None:
+    """
+    Set the OAuth2 scope of *user_id* to *scope*.
+
+    :param user_id: the user's identification
+    :param scope: the OAuth2 scope to set to the user
+    :param logger: optional logger
+    """
+    global _jusbr_registry
+
+    # retrieve user data
+    user_data: dict[str, Any] = __get_user_data(user_id=user_id,
+                                                logger=logger)
+    # set the OAuth2 scope
+    user_data["oauth-scope"] = scope
+    if logger:
+        logger.debug(f"Scope for user '{user_id}' set to '{scope}'")
+
+
+def __get_login_timeout() -> int | None:
+    """
+    Retrieve the timeout currently applicable for the login operation.
+
+    :return: the current login timeout, or *None* if none has been set.
+    """
+    global _jusbr_registry
+
+    timeout: int = _jusbr_registry.get("login-timeout")
+    return timeout if isinstance(timeout, int) and timeout > 0 else None
+
+
+def __get_user_data(user_id: str,
+                    logger: Logger | None) -> dict[str, Any]:
+    """
+    Retrieve the data for *user_id* from the registry.
+
+    If an entry is not found for *user_id* in the registry, it is created.
+    It will remain there until the user is logged out.
+
+    :param user_id:
+    :return: the data for *user_id* in the registry
+    """
+    global _jusbr_registry
+
+    result: dict[str, Any] = _jusbr_registry["users"].get(user_id)
+    if not result:
+        result = {"access-expiration": int(datetime.now(tz=TZ_LOCAL).timestamp())}
+        _jusbr_registry["users"][user_id] = result
+        if logger:
+            logger.debug(f"Entry for user '{user_id}' added to registry")
+
+    return result
+
+
 def __post_jusbr(user_data: dict[str, Any],
                  body_data: dict[str, Any],
                  errors: list[str] | None,
@@ -328,7 +384,7 @@ def __post_jusbr(user_data: dict[str, Any],
     If successful, the token data is stored in the registry, and the token itself is returned.
     Otherwise, *errors* will contain the appropriate error message.
 
-    :param user_data: the user data in the registry
+    :param user_data: the user's data in the registry
     :param body_data: the data to send in the body of the request
     :param errors: incidental errors
     :param logger: optional logger
