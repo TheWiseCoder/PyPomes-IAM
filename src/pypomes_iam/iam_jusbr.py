@@ -379,9 +379,17 @@ def __post_jusbr(user_data: dict[str, Any],
                  errors: list[str] | None,
                  logger: Logger | None) -> None:
     """
-    Send a POST request to JusBR to obtain the authorization token.
+    Send a POST request to JusBR to obtain the authentication tokens.
 
-    If successful, the token data is stored in the registry, and the token itself is returned.
+    For code for token exchange, *body_data* will have the attributes
+        - "grant_type": "authorization_code"
+        - "code": <16-character-random-code>
+        - "redirect_url": <callback-url>
+    For token refresh, *body_data* will have the attributes
+        - "grant_type": "refresh_token"
+        - "refresh_token": <current-refresh-token>
+
+    If the operation is successful, the token data is stored in the registry.
     Otherwise, *errors* will contain the appropriate error message.
 
     :param user_data: the user's data in the registry
@@ -411,28 +419,30 @@ def __post_jusbr(user_data: dict[str, Any],
         # }
         response: requests.Response = requests.post(url=url,
                                                     data=body_data)
-        if response.status_code < 200 or response.status_code >= 300:
-            # request resulted in error, report the problem
+        if response.status_code == 200:
+            # request succeeded
+            reply: dict[str, Any] = response.json()
+            result = reply.get("access_token")
+            safe_cache: Cache = FIFOCache(maxsize=1024)
+            safe_cache["access-token"] = result
+            # on token refresh, keep current refresh token if a new one is not provided
+            safe_cache["refresh-token"] = reply.get("refresh_token") or body_data.get("refresh_token")
+            user_data["cache-obj"] = safe_cache
+            user_data["access-expiration"] = now + reply.get("expires_in")
+            if logger:
+                logger.debug(msg=f"POST '{url}': status {response.status_code}")
+        else:
+            # request resulted in error
             err_msg = (f"POST '{url}': failed, "
                        f"status {response.status_code}, reason '{response.reason}'")
             if response.status_code == 401 and "refresh_token" in body_data:
                 # refresh token is no longer valid
                 safe_cache["refresh-token"] = None
-        else:
-            reply: dict[str, Any] = response.json()
-            result = reply.get("access_token")
-            safe_cache: Cache = FIFOCache(maxsize=1024)
-            safe_cache["access-token"] = result
-            safe_cache["refresh-token"] = reply.get("refresh_token")
-            user_data["cache-obj"] = safe_cache
-            user_data["access-expiration"] = now + reply.get("expires_in")
-            if logger:
-                logger.debug(msg=f"POST '{url}': status {response.status_code}")
     except Exception as e:
         # the operation raised an exception
         err_msg = exc_format(exc=e,
                              exc_info=sys.exc_info())
-        err_msg = f"POST '{url}': error, '{err_msg}'"
+        err_msg = f"POST '{url}': error '{err_msg}'"
 
     if err_msg:
         if isinstance(errors, list):
