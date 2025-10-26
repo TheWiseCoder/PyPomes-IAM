@@ -13,26 +13,20 @@ from typing import Any, Final
 
 JUSBR_CLIENT_ID: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CLIENT_ID")
 JUSBR_CLIENT_SECRET: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CLIENT_SECRET")
-JUSBR_LOGIN_TIMEOUT: Final[int] = env_get_int(key=f"{APP_PREFIX}_JUSBR_LOGIN_TIMEOUT")
+JUSBR_CLIENT_TIMEOUT: Final[int] = env_get_int(key=f"{APP_PREFIX}_JUSBR_CLIENT_TIMEOUT")
 
-JUSBR_CALLBACK_ENDPOINT: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CALLBACK_ENDPOINT",
+JUSBR_ENDPOINT_CALLBACK: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_ENDPOINT_CALLBACK",
                                                   def_value="/iam/jusbr:callback")
-JUSBR_TOKEN_ENDPOINT: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_TOKEN_ENDPOINT",
-                                               def_value="/iam/jusbr:get-token")
-JUSBR_LOGIN_ENDPOINT: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_LOGIN_ENDPOINT",
+JUSBR_ENDPOINT_LOGIN: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_ENDPOINT_LOGIN",
                                                def_value="/iam/jusbr:login")
-JUSBR_LOGOUT_ENDPOINT: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_LOGOUT_ENDPOINT",
+JUSBR_ENDPOINT_LOGOUT: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_ENDPOINT_LOGOUT",
                                                 def_value="/iam/jusbr:logout")
+JUSBR_ENDPOINT_TOKEN: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_ENDPOINT_TOKEN",
+                                               def_value="/iam/jusbr:get-token")
 
-JUSBR_CALLBACK_URL: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CALLBACK_URL")
-JUSBR_AUTH_URL: Final[str] = env_get_str(
-    key=f"{APP_PREFIX}JUSBR_AUTH_URL",
-    def_value="https://sso.stg.cloud.pje.jus.br/auth/realms/pje/protocol/openid-connect/auth"
-)
-JUSBR_TOKEN_URL: Final[str] = env_get_str(
-    key=f"{APP_PREFIX}JUSBR_TOKEN_URL",
-    def_value="https://sso.stg.cloud.pje.jus.br/auth/realms/pje/protocol/openid-connect/token"
-)
+JUSBR_URL_AUTH_CALLBACK: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_URL_AUTH_CALLBACK")
+JUSBR_URL_AUTH_LOGIN: Final[str] = env_get_str(key=f"{APP_PREFIX}JUSBR_URL_AUTH_LOGIN")
+JUSBR_URL_AUTH_TOKEN: Final[str] = env_get_str(key=f"{APP_PREFIX}JUSBR_URL_AUTH_TOKEN")
 
 # safe memory cache - structure:
 # {
@@ -40,8 +34,8 @@ JUSBR_TOKEN_URL: Final[str] = env_get_str(
 #    "client-secret": <str>,
 #    "auth-url": <str>,
 #    "token-url": <str>,
-#    "login-timeout": <int>,
-#    "users": [
+#    "client-timeout": <int>,
+#    "users": {
 #       "<user-id>": {
 #         "cache-obj": <Cache>,
 #         "oauth-scope": <str>,
@@ -51,16 +45,16 @@ JUSBR_TOKEN_URL: Final[str] = env_get_str(
 #           "access-token": <str>
 #           "refresh-token": <str>
 #       }
-#    ]
+#    }
 # }
 _jusbr_registry: dict[str, Any] = {
     "client-id": None,
     "client-secret": None,
-    "login-timeout": None,
+    "client-timeout": None,
     "auth-url": None,
     "callback-url": None,
     "token-url": None,
-    "users": []
+    "users": {}
 }
 
 # dafault logger
@@ -70,14 +64,14 @@ _logger: Logger | None = None
 def jusbr_setup(flask_app: Flask,
                 client_id: str = JUSBR_CLIENT_ID,
                 client_secret: str = JUSBR_CLIENT_SECRET,
-                login_timeout: int = JUSBR_LOGIN_TIMEOUT,
-                callback_endpoint: str = JUSBR_CALLBACK_ENDPOINT,
-                token_endpoint: str = JUSBR_TOKEN_ENDPOINT,
-                login_endpoint: str = JUSBR_LOGIN_ENDPOINT,
-                logout_endpoint: str = JUSBR_LOGOUT_ENDPOINT,
-                auth_url: str = JUSBR_AUTH_URL,
-                callback_url: str = JUSBR_CALLBACK_URL,
-                token_url: str = JUSBR_TOKEN_URL,
+                client_timeout: int = JUSBR_CLIENT_TIMEOUT,
+                callback_endpoint: str = JUSBR_ENDPOINT_CALLBACK,
+                token_endpoint: str = JUSBR_ENDPOINT_TOKEN,
+                login_endpoint: str = JUSBR_ENDPOINT_LOGIN,
+                logout_endpoint: str = JUSBR_ENDPOINT_LOGOUT,
+                auth_url: str = JUSBR_URL_AUTH_LOGIN,
+                callback_url: str = JUSBR_URL_AUTH_CALLBACK,
+                token_url: str = JUSBR_URL_AUTH_TOKEN,
                 logger: Logger = None) -> None:
     """
     Configure the JusBR IAM.
@@ -87,7 +81,7 @@ def jusbr_setup(flask_app: Flask,
     :param flask_app: the Flask application
     :param client_id: the client's identification with JusBR
     :param client_secret: the client's password with JusBR
-    :param login_timeout: timeout for login authentication (in seconds,defaults to no timeout)
+    :param client_timeout: timeout for login authentication (in seconds,defaults to no timeout)
     :param callback_endpoint: endpoint for the callback from JusBR
     :param token_endpoint: endpoint for retrieving the JusBR authentication token
     :param login_endpoint: endpoint for redirecting user to JusBR login page
@@ -106,7 +100,7 @@ def jusbr_setup(flask_app: Flask,
     _jusbr_registry.update({
         "client-id": client_id,
         "client-secret": client_secret,
-        "login-timeout": login_timeout,
+        "client-timeout": client_timeout,
         "auth-url": auth_url,
         "callback-url": callback_url,
         "token-url": token_url
@@ -189,12 +183,12 @@ def service_logout() -> Response:
     global _jusbr_registry
 
     # retrieve user id
-    input_params: dict[str, Any] = request.values
+    input_params: dict[str, Any] = request.args
     user_id: str = input_params.get("user-id") or input_params.get("login")
 
     # remove user data
     if user_id in _jusbr_registry.get("users"):
-        _jusbr_registry.pop(user_id)
+        _jusbr_registry["users"].pop(user_id)
         if _logger:
             _logger.debug(f"User '{user_id}' removed from the registry")
 
@@ -262,7 +256,7 @@ def service_token() -> Response:
     :return: the response containing the token, or *NOT AUTHORIZED*
     """
     # retrieve user id
-    input_params: dict[str, Any] = request.values
+    input_params: dict[str, Any] = request.args
     user_id: str = input_params.get("user-id") or input_params.get("login")
 
     # retrieve the token
@@ -293,9 +287,10 @@ def jusbr_get_token(user_id: str,
     # initialize the return variable
     result: str | None = None
 
-    user_data: dict[str, Any] = _jusbr_registry["users"].get(user_id)
-    safe_cache: Cache = user_data["cache-obj"] if user_data else None
-    if user_data and safe_cache:
+    user_data: dict[str, Any] = __get_user_data(user_id=user_id,
+                                                logger=logger)
+    safe_cache: Cache = user_data.get("cache-obj")
+    if safe_cache:
         access_expiration: int = user_data.get("access-expiration")
         now: int = int(datetime.now(tz=TZ_LOCAL).timestamp())
         if now < access_expiration:
@@ -353,7 +348,7 @@ def __get_login_timeout() -> int | None:
     """
     global _jusbr_registry
 
-    timeout: int = _jusbr_registry.get("login-timeout")
+    timeout: int = _jusbr_registry.get("client-timeout")
     return timeout if isinstance(timeout, int) and timeout > 0 else None
 
 
