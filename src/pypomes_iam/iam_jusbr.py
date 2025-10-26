@@ -14,6 +14,7 @@ from typing import Any, Final
 JUSBR_CLIENT_ID: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CLIENT_ID")
 JUSBR_CLIENT_SECRET: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CLIENT_SECRET")
 JUSBR_LOGIN_TIMEOUT: Final[int] = env_get_int(key=f"{APP_PREFIX}_JUSBR_LOGIN_TIMEOUT")
+
 JUSBR_CALLBACK_ENDPOINT: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CALLBACK_ENDPOINT",
                                                   def_value="/iam/jusbr:callback")
 JUSBR_TOKEN_ENDPOINT: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_TOKEN_ENDPOINT",
@@ -22,6 +23,8 @@ JUSBR_LOGIN_ENDPOINT: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_LOGIN_EN
                                                def_value="/iam/jusbr:login")
 JUSBR_LOGOUT_ENDPOINT: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_LOGOUT_ENDPOINT",
                                                 def_value="/iam/jusbr:logout")
+
+JUSBR_CALLBACK_URL: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CALLBACK_URL")
 JUSBR_AUTH_URL: Final[str] = env_get_str(
     key=f"{APP_PREFIX}JUSBR_AUTH_URL",
     def_value="https://sso.stg.cloud.pje.jus.br/auth/realms/pje/protocol/openid-connect/auth"
@@ -30,7 +33,6 @@ JUSBR_TOKEN_URL: Final[str] = env_get_str(
     key=f"{APP_PREFIX}JUSBR_TOKEN_URL",
     def_value="https://sso.stg.cloud.pje.jus.br/auth/realms/pje/protocol/openid-connect/token"
 )
-JUSBR_CALLBACK_URL: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CALLBACK_URL")
 
 # safe memory cache - structure:
 # {
@@ -56,6 +58,7 @@ _jusbr_registry: dict[str, Any] = {
     "client-secret": None,
     "login-timeout": None,
     "auth-url": None,
+    "callback-url": None,
     "token-url": None,
     "users": []
 }
@@ -73,6 +76,7 @@ def jusbr_setup(flask_app: Flask,
                 login_endpoint: str = JUSBR_LOGIN_ENDPOINT,
                 logout_endpoint: str = JUSBR_LOGOUT_ENDPOINT,
                 auth_url: str = JUSBR_AUTH_URL,
+                callback_url: str = JUSBR_CALLBACK_URL,
                 token_url: str = JUSBR_TOKEN_URL,
                 logger: Logger = None) -> None:
     """
@@ -89,6 +93,7 @@ def jusbr_setup(flask_app: Flask,
     :param login_endpoint: endpoint for redirecting user to JusBR login page
     :param logout_endpoint: endpoint for terminating user access to JusBR
     :param auth_url: URL to access the JusBR login page
+    :param callback_url: URL for JusBR to callback on login
     :param token_url: URL for obtaing or refreshing the token
     :param logger: optional logger
     """
@@ -103,6 +108,7 @@ def jusbr_setup(flask_app: Flask,
         "client-secret": client_secret,
         "login-timeout": login_timeout,
         "auth-url": auth_url,
+        "callback-url": callback_url,
         "token-url": token_url
     })
 
@@ -161,7 +167,7 @@ def service_login() -> Response:
     user_data["cache-obj"] = safe_cache
     auth_url: str = (f"{_jusbr_registry["auth-url"]}?response_type=code"
                      f"&client_id={_jusbr_registry["client-id"]}"
-                     f"&redirect_url={_jusbr_registry["redirect-url"]}"
+                     f"&redirect_url={_jusbr_registry["callback-url"]}"
                      f"&state={oauth_state}")
     if user_data.get("oauth-scope"):
         auth_url += f"&scope={user_data.get("oauth-scope")}"
@@ -225,7 +231,7 @@ def service_callback() -> Response:
         body_data: dict[str, Any] = {
             "grant_type": "authorization_code",
             "code": code,
-            "redirec_url": _jusbr_registry.get("redirect-url"),
+            "redirec_url": _jusbr_registry.get("callback-url"),
         }
         token = __post_jusbr(user_data=user_data,
                              body_data=body_data,
