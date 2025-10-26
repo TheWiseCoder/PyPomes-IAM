@@ -1,14 +1,14 @@
-from .iam_jusbr import (
+from .jusbr_pomes import (
     jusbr_setup, jusbr_get_token, jusbr_set_scope
 )
-from .iam_provider import (
+from .provider_pomes import (
     provider_register, provider_get_token
 )
 
 __all__ = [
-    # iam_jusbr
+    # jusbr_pomes
     "jusbr_setup", "jusbr_get_token", "jusbr_set_scope",
-    # jwt_provider
+    # provider_pomes
     "provider_register", "provider_get_token"
 ]
 

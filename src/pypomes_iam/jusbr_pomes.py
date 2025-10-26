@@ -205,7 +205,7 @@ def service_logout() -> Response:
 #                  methods=["POST"])
 def service_callback() -> Response:
     """
-    Entry point for the callback from JusBR on authentication.
+    Entry point for the callback from JusBR on authentication operation.
 
     :return: the response containing the token, or *NOT AUTHORIZED*
     """
