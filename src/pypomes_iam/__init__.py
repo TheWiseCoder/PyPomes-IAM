@@ -1,4 +1,4 @@
-from iam_jusbr import (
+from .iam_jusbr import (
     jusbr_setup, jusbr_get_token, jusbr_set_scope
 )
 from .iam_provider import (
