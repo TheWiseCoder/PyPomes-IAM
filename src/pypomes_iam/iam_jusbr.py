@@ -218,6 +218,7 @@ def service_callback() -> Response:
                 break
 
     # exchange 'code' for the token
+    token: str | None = None
     errors: list[str] = []
     if user_data:
         code: str = request.args.get("code")
@@ -226,10 +227,10 @@ def service_callback() -> Response:
             "code": code,
             "redirec_url": _jusbr_registry.get("redirect-url"),
         }
-        __post_jusbr(user_data=user_data,
-                     body_data=body_data,
-                     errors=errors,
-                     logger=_logger)
+        token = __post_jusbr(user_data=user_data,
+                             body_data=body_data,
+                             errors=errors,
+                             logger=_logger)
     else:
         msg: str = "Unknown OAuth2 code received"
         if __get_login_timeout():
@@ -241,7 +242,7 @@ def service_callback() -> Response:
         result = jsonify({"errors": "; ".join(errors)})
         result.status_code = 400
     else:
-        result = Response(status=200)
+        result = jsonify({"access_token": token})
 
     return result
 
@@ -279,6 +280,7 @@ def jusbr_get_token(user_id: str,
     :param user_id: the user's identification
     :param errors: incidental error messages
     :param logger: optional logger
+    :return: the token for *user_id*, or *None* if error
     """
     global _jusbr_registry
 
@@ -301,12 +303,10 @@ def jusbr_get_token(user_id: str,
                     "grant_type": "refresh_token",
                     "refresh_token": refresh_token
                 }
-                __post_jusbr(user_data=user_data,
-                             body_data=body_data,
-                             errors=errors,
-                             logger=logger)
-                if not errors:
-                    result = safe_cache.get("access_token")
+                result = __post_jusbr(user_data=user_data,
+                                      body_data=body_data,
+                                      errors=errors,
+                                      logger=logger)
 
     elif logger or isinstance(errors, list):
         err_msg: str = f"User '{user_id}' not authenticated with JusBR"
@@ -377,9 +377,9 @@ def __get_user_data(user_id: str,
 def __post_jusbr(user_data: dict[str, Any],
                  body_data: dict[str, Any],
                  errors: list[str] | None,
-                 logger: Logger | None) -> None:
+                 logger: Logger | None) -> str | None:
     """
-    Send a POST request to JusBR to obtain the authentication tokens.
+    Send a POST request to JusBR to obtain the authentication token data, and return the access token.
 
     For code for token exchange, *body_data* will have the attributes
         - "grant_type": "authorization_code"
@@ -396,8 +396,12 @@ def __post_jusbr(user_data: dict[str, Any],
     :param body_data: the data to send in the body of the request
     :param errors: incidental errors
     :param logger: optional logger
+    :return: the access token obtained, or *None* if error
     """
     global _jusbr_registry
+
+    # initialize the return variable
+    result: str | None = None
 
     # complete the data to send in body of request
     body_data["client_id"] = _jusbr_registry.get("client-id")
@@ -449,3 +453,5 @@ def __post_jusbr(user_data: dict[str, Any],
             errors.append(err_msg)
         if logger:
             logger.error(msg=err_msg)
+
+    return result
