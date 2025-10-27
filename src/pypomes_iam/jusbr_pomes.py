@@ -123,7 +123,7 @@ def jusbr_setup(flask_app: Flask,
         flask_app.add_url_rule(rule=callback_endpoint,
                                endpoint="jusbr-callback",
                                view_func=service_callback,
-                               methods=["POST"])
+                               methods=["GET", "POST"])
 
 
 # @flask_app.route(rule=<login_endpoint>,  # JUSBR_LOGIN_ENDPOINT: /iam/jusbr:login
@@ -192,7 +192,7 @@ def service_logout() -> Response:
 
 
 # @flask_app.route(rule=<callback_endpoint>,  # JUSBR_CALLBACK_ENDPOINT: /iam/jusbr:callback
-#                  methods=["POST"])
+#                  methods=["GET", "POST"])
 def service_callback() -> Response:
     """
     Entry point for the callback from JusBR on authentication operation.
@@ -495,6 +495,8 @@ def __post_jusbr(user_data: dict[str, Any],
             # request resulted in error
             err_msg = (f"POST '{url}': failed, "
                        f"status {response.status_code}, reason '{response.reason}'")
+            if hasattr(response, "content") and response.content:
+                err_msg += f", content '{response.content}'"
             if response.status_code == 401 and "refresh_token" in body_data:
                 # refresh token is no longer valid
                 safe_cache["refresh-token"] = None
