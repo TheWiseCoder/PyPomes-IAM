@@ -1,10 +1,11 @@
+import json
 import requests
 import secrets
 import string
 import sys
 from cachetools import Cache, FIFOCache, TTLCache
 from datetime import datetime
-from flask import Flask, Response, redirect, request, jsonify
+from flask import Flask, Request, Response, redirect, request, jsonify
 from logging import Logger
 from pypomes_core import (
     APP_PREFIX, TZ_LOCAL, env_get_int, env_get_str, exc_format
@@ -138,6 +139,11 @@ def service_login() -> Response:
     """
     global _jusbr_registry
 
+    # log the request
+    if _logger:
+        msg: str = __log_init(request=request)
+        _logger.debug(msg=msg)
+
     # retrieve user data (if not provided, 'user_id' is temporarily set to 'oauth_state'
     input_params: dict[str, Any] = request.values
     oauth_state: str = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
@@ -162,8 +168,14 @@ def service_login() -> Response:
     if user_data.get("oauth-scope"):
         auth_url += f"&scope={user_data.get("oauth-scope")}"
 
-    # redirect request
-    return redirect(location=auth_url)
+    # redirect the request
+    result: Response = redirect(location=auth_url)
+
+    # log the response
+    if _logger:
+        _logger.debug(msg=f"Response {result}")
+
+    return result
 
 
 # @flask_app.route(rule=<login_endpoint>,  # JUSBR_LOGIN_ENDPOINT: /iam/jusbr:logout
@@ -178,6 +190,11 @@ def service_logout() -> Response:
     """
     global _jusbr_registry
 
+    # log the request
+    if _logger:
+        msg: str = __log_init(request=request)
+        _logger.debug(msg=msg)
+
     # retrieve user id
     input_params: dict[str, Any] = request.args
     user_id: str = input_params.get("user-id") or input_params.get("login")
@@ -188,7 +205,13 @@ def service_logout() -> Response:
         if _logger:
             _logger.debug(f"User '{user_id}' removed from the registry")
 
-    return Response(status=200)
+    result: Response = Response(status=200)
+
+    # log the response
+    if _logger:
+        _logger.debug(msg=f"Response {result}")
+
+    return result
 
 
 # @flask_app.route(rule=<callback_endpoint>,  # JUSBR_CALLBACK_ENDPOINT: /iam/jusbr:callback
@@ -201,6 +224,11 @@ def service_callback() -> Response:
     """
     global _jusbr_registry
     from .token_pomes import token_validate
+
+    # log the request
+    if _logger:
+        msg: str = __log_init(request=request)
+        _logger.debug(msg=msg)
 
     # validate the OAuth2 state
     oauth_state: str = request.args.get("state")
@@ -260,6 +288,10 @@ def service_callback() -> Response:
             "user_id": user_id,
             "access_token": token})
 
+    # log the response
+    if _logger:
+        _logger.debug(msg=f"Response {result}")
+
     return result
 
 
@@ -271,11 +303,14 @@ def service_token() -> Response:
 
     :return: the response containing the token, or *UNAUTHORIZED*
     """
-    # retrieve user id
-    input_params: dict[str, Any] = request.args
-    user_id: str = input_params.get("user-id") or input_params.get("login")
+    # log the request
+    if _logger:
+        msg: str = __log_init(request=request)
+        _logger.debug(msg=msg)
 
     # retrieve the token
+    input_params: dict[str, Any] = request.args
+    user_id: str = input_params.get("user-id") or input_params.get("login")
     errors: list[str] = []
     token: str = jusbr_get_token(user_id=user_id,
                                  logger=_logger)
@@ -285,6 +320,10 @@ def service_token() -> Response:
     else:
         result = Response("; ".join(errors))
         result.status_code = 401
+
+    # log the response
+    if _logger:
+        _logger.debug(msg=f"Response {result}")
 
     return result
 
@@ -513,3 +552,10 @@ def __post_jusbr(user_data: dict[str, Any],
             logger.error(msg=err_msg)
 
     return result
+
+
+def __log_init(request: Request) -> str:
+
+    params: str = json.dumps(obj=request.args,
+                             ensure_ascii=False)
+    return f"Request {request.method}:{request.path}, params {params}"
