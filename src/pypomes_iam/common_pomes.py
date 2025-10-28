@@ -31,7 +31,6 @@ from typing import Any
 #         "access-expiration": <timestamp>,
 #         "login-expiration": <timestamp>,   <-- transient
 #         "login-id": <str>,                 <-- transient
-#         "oauth-scope": <str>               <-- optional
 #       }
 #    }
 # }
@@ -132,15 +131,11 @@ def _service_login(registry: dict[str, Any],
     user_data["login-expiration"] = int(datetime.now(tz=TZ_LOCAL).timestamp()) + timeout if timeout else None
 
     # build the redirect url
-    result: str = (f"{registry["base-url"]}/protocol/openid-connect/auth?response_type=code"
+    result: str = (f"{registry["base-url"]}/protocol/openid-connect/auth"
+                   f"?response_type=code&scope=openid"
                    f"&client_id={registry["client-id"]}"
                    f"&redirect_uri={registry["callback-url"]}"
                    f"&state={oauth_state}")
-    scope: str = _get_user_scope(registry=registry,
-                                 user_id=user_id)
-    if scope:
-        user_data["oauth-scope"] = scope
-        result += f"&scope={scope}"
 
     # logout the user
     _service_logout(registry=registry,
@@ -300,27 +295,6 @@ def _get_user_data(registry: dict[str, Any],
             logger.debug(msg=f"Entry for user '{user_id}' added to the registry")
     elif logger:
         logger.debug(msg=f"Entry for user '{user_id}' obtained from the registry")
-
-    return result
-
-
-def _get_user_scope(registry: dict[str, Any],
-                    user_id: str) -> str | None:
-    """
-    Retrieve the OAuth2 scope associated with *user_id*.
-
-    :param registry: the registry holding the authentication data
-    :param user_id:
-    :return: the OAuth2 scope associated with *user_id*, or *None* if it does not exist
-    """
-    # initialize the return variable
-    result: str | None = None
-
-    if user_id:
-        cache: Cache = registry["safe-cache"]
-        users: dict[str, dict[str, Any]] = cache.get("users")
-        if user_id in users:
-            result = users[user_id].get("oauth2-scope")
 
     return result
 

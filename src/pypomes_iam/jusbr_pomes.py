@@ -7,7 +7,7 @@ from pypomes_core import (
 )
 from typing import Any, Final
 
-from .common_pomes import _service_token, _get_user_data
+from .common_pomes import _service_token
 
 JUSBR_CLIENT_ID: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CLIENT_ID")
 JUSBR_CLIENT_SECRET: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CLIENT_SECRET")
@@ -48,7 +48,6 @@ JUSBR_URL_AUTH_CALLBACK: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_URL_A
 #         "access-expiration": <timestamp>,
 #         "login-expiration": <timestamp>,   <-- transient
 #         "login-id": <str>,                 <-- transient
-#         "oauth-scope": <str>               <-- optional
 #       }
 #    }
 # }
@@ -148,25 +147,3 @@ def jusbr_get_token(user_id: str,
                           args=args,
                           errors=errors,
                           logger=logger)
-
-
-def jusbr_set_scope(user_id: str,
-                    scope: str,
-                    logger: Logger = None) -> None:
-    """
-    Set the OAuth2 scope of *user_id* to *scope*.
-
-    :param user_id: the user's identification
-    :param scope: the OAuth2 scope to set to the user
-    :param logger: optional logger
-    """
-    global _jusbr_registry
-
-    # retrieve user data
-    user_data: dict[str, Any] = _get_user_data(registry=_jusbr_registry,
-                                               user_id=user_id,
-                                               logger=logger)
-    # set the OAuth2 scope
-    user_data["oauth-scope"] = scope
-    if logger:
-        logger.debug(msg=f"Scope for user '{user_id}' set to '{scope}'")
