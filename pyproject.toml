@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pypomes_iam"
-version = "0.1.7"
+version = "0.1.9"
 authors = [
   { name="GT Nunes", email="wisecoder01@gmail.com" }
 ]
@@ -22,7 +22,7 @@ dependencies = [
     "cachetools>=6.2.1",
     "Flask>=3.1.2",
     "PyJWT>=2.10.1",
-    "pypomes-core>=2.8.0",
+    "pypomes-core>=2.8.1",
     "pypomes-crypto>=0.4.8",
     "requests>=2.32.5"
 ]

@@ -1,6 +1,9 @@
 from .jusbr_pomes import (
     jusbr_setup, jusbr_get_token, jusbr_set_scope
 )
+from .keycloak_pomes import (
+    keycloak_setup, keycloak_get_token, keycloak_set_scope
+)
 from .provider_pomes import (
     provider_register, provider_get_token
 )
@@ -11,6 +14,8 @@ from .token_pomes import (
 __all__ = [
     # jusbr_pomes
     "jusbr_setup", "jusbr_get_token", "jusbr_set_scope",
+    # keycloak_pomes
+    "keycloak_setup", "keycloak_get_token", "keycloak_set_scope",
     # provider_pomes
     "provider_register", "provider_get_token",
     # token_pomes

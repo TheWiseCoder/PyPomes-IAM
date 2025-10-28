@@ -1,15 +1,17 @@
-# import requests
-# import secrets
-# import string
-# import sys
-# from cachetools import Cache, FIFOCache, TTLCache
-# from datetime import datetime
+from cachetools import FIFOCache
+from datetime import datetime
 from flask import Flask, Response, redirect, request, jsonify
 from logging import Logger
 from pypomes_core import (
-    APP_PREFIX, TZ_LOCAL, env_get_int, env_get_str, exc_format
+    APP_PREFIX, TZ_LOCAL, env_get_int, env_get_str
 )
 from typing import Any, Final
+
+from .common_pomes import (
+    _service_login, _service_logout,
+    _service_callback, _service_token,
+    _get_user_data, _log_init
+)
 
 KEYCLOAK_CLIENT_ID: Final[str] = env_get_str(key=f"{APP_PREFIX}_KEYCLOAK_CLIENT_ID")
 KEYCLOAK_CLIENT_SECRET: Final[str] = env_get_str(key=f"{APP_PREFIX}_KEYCLOAK_CLIENT_SECRET")
@@ -24,6 +26,8 @@ KEYCLOAK_ENDPOINT_LOGOUT: Final[str] = env_get_str(key=f"{APP_PREFIX}_KEYCLOAK_E
 KEYCLOAK_ENDPOINT_TOKEN: Final[str] = env_get_str(key=f"{APP_PREFIX}_KEYCLOAK_ENDPOINT_TOKEN",
                                                   def_value="/iam/keycloak:get-token")
 
+KEYCLOAK_PUBLIC_KEY_LIFETIME: Final[int] = env_get_int(key=f"{APP_PREFIX}_KEYCLOAK_PUBLIC_KEY_LIFETIME",
+                                                       def_value=86400)  # 24 hours
 KEYCLOAK_REALM: Final[str] = env_get_str(key=f"{APP_PREFIX}_KEYCLOAK_REALM")
 KEYCLOAK_URL_AUTH_BASE: Final[str] = env_get_str(key=f"{APP_PREFIX}_KEYCLOAK_URL_AUTH_BASE")
 KEYCLOAK_URL_AUTH_CALLBACK: Final[str] = env_get_str(key=f"{APP_PREFIX}_KEYCLOAK_URL_AUTH_CALLBACK")
@@ -33,30 +37,27 @@ KEYCLOAK_URL_AUTH_CALLBACK: Final[str] = env_get_str(key=f"{APP_PREFIX}_KEYCLOAK
 #    "client-id": <str>,
 #    "client-secret": <str>,
 #    "client-timeout": <int>,
-#    "realm": <str>,
-#    "auth-url": <str>,
+#    "public_key": <str>,
+#    "key-lifetime": <int>,
+#    "key-expiration": <int>,
+#    "base-url": <str>,
 #    "callback-url": <str>,
+#    "safe-cache": <FIFOCache>
+# }
+# data in "safe-cache":
+# {
 #    "users": {
 #       "<user-id>": {
-#         "cache-obj": <Cache>,
-#         "oauth-scope": <str>,
+#         "access-token": <str>
+#         "refresh-token": <str>
 #         "access-expiration": <timestamp>,
-#         data in <Cache>:
-#           "oauth-state": <str>
-#           "access-token": <str>
-#           "refresh-token": <str>
+#         "login-expiration": <timestamp>,   <-- transient
+#         "login-id": <str>,                 <-- transient
+#         "oauth-scope": <str>               <-- optional
 #       }
 #    }
 # }
-_keycloak_registry: dict[str, Any] = {
-    "client-id": None,
-    "client-secret": None,
-    "client-timeout": None,
-    "realm": None,
-    "auth-url": None,
-    "callback-url": None,
-    "users": {}
-}
+_keycloak_registry: dict[str, Any] = {}
 
 # dafault logger
 _logger: Logger | None = None
@@ -66,12 +67,13 @@ def keycloak_setup(flask_app: Flask,
                    client_id: str = KEYCLOAK_CLIENT_ID,
                    client_secret: str = KEYCLOAK_CLIENT_SECRET,
                    client_timeout: int = KEYCLOAK_CLIENT_TIMEOUT,
+                   public_key_lifetime: int = KEYCLOAK_PUBLIC_KEY_LIFETIME,
                    realm: str = KEYCLOAK_REALM,
                    callback_endpoint: str = KEYCLOAK_ENDPOINT_CALLBACK,
                    token_endpoint: str = KEYCLOAK_ENDPOINT_TOKEN,
                    login_endpoint: str = KEYCLOAK_ENDPOINT_LOGIN,
                    logout_endpoint: str = KEYCLOAK_ENDPOINT_LOGOUT,
-                   auth_url: str = KEYCLOAK_URL_AUTH_BASE,
+                   base_url: str = KEYCLOAK_URL_AUTH_BASE,
                    callback_url: str = KEYCLOAK_URL_AUTH_CALLBACK,
                    logger: Logger = None) -> None:
     """
@@ -83,12 +85,13 @@ def keycloak_setup(flask_app: Flask,
     :param client_id: the client's identification with JusBR
     :param client_secret: the client's password with JusBR
     :param client_timeout: timeout for login authentication (in seconds,defaults to no timeout)
-    :param realm: the Keycloak reals
+    :param public_key_lifetime: how long to use Keycloak's public key, before refreshing it (in seconds)
+    :param realm: the Keycloak realm
     :param callback_endpoint: endpoint for the callback from JusBR
     :param token_endpoint: endpoint for retrieving the JusBR authentication token
     :param login_endpoint: endpoint for redirecting user to JusBR login page
     :param logout_endpoint: endpoint for terminating user access to JusBR
-    :param auth_url: base URL to request the JusBR services
+    :param base_url: base URL to request the JusBR services
     :param callback_url: URL for Keycloak to callback on login
     :param logger: optional logger
     """
@@ -99,15 +102,16 @@ def keycloak_setup(flask_app: Flask,
     _logger = logger
 
     # configure the JusBR registry
-    _keycloak_registry.update({
+    _keycloak_registry = {
         "client-id": client_id,
         "client-secret": client_secret,
         "client-timeout": client_timeout,
-        "realm": realm,
-        "auth-url": auth_url,
+        "base-url": f"{base_url}/realms/{realm}",
         "callback-url": callback_url,
-        "users": []
-    })
+        "key-expiration": int(datetime.now(tz=TZ_LOCAL).timestamp()),
+        "key-lifetime": public_key_lifetime,
+        "safe-cache": FIFOCache(maxsize=1048576)
+    }
 
     # establish the endpoints
     if token_endpoint:
@@ -144,28 +148,52 @@ def service_login() -> Response:
     """
     global _keycloak_registry
 
-    # retrieve user id
-    input_params: dict[str, Any] = request.args
-    _user_id: str = input_params.get("user-id") or input_params.get("login")
-    return Response()
+    # log the request
+    if _logger:
+        _logger.debug(msg=_log_init(request=request))
+
+    # obtain the redirect URL
+    auth_url: str = _service_login(registry=_keycloak_registry,
+                                   args=request.args,
+                                   logger=_logger)
+    # redirect the request
+    result: Response = redirect(location=auth_url)
+
+    # log the response
+    if _logger:
+        _logger.debug(msg=f"Response {result}")
+
+    return result
 
 
 # @flask_app.route(rule=<login_endpoint>,  # KEYCLOAK_LOGIN_ENDPOINT: /iam/keycloak:logout
 #                  methods=["GET"])
 def service_logout() -> Response:
     """
-    Entry point for the JusBR logout service.
+    Entry point for the Keycloak logout service.
 
-    Remove all data associating the user with JusBR from the registry.
+    Remove all data associating the user with Keycloak from the registry.
 
     :return: response *OK*
     """
     global _keycloak_registry
 
-    # retrieve user id
-    input_params: dict[str, Any] = request.args
-    _user_id: str = input_params.get("user-id") or input_params.get("login")
-    return Response()
+    # log the request
+    if _logger:
+        _logger.debug(msg=_log_init(request=request))
+
+    # logout the user
+    _service_logout(registry=_keycloak_registry,
+                    args=request.args,
+                    logger=_logger)
+
+    result: Response = Response(status=200)
+
+    # log the response
+    if _logger:
+        _logger.debug(msg=f"Response {result}")
+
+    return result
 
 
 # @flask_app.route(rule=<callback_endpoint>,  # KEYCLOAK_CALLBACK_ENDPOINT: /iam/keycloak:callback
@@ -177,7 +205,31 @@ def service_callback() -> Response:
     :return: the response containing the token, or *NOT AUTHORIZED*
     """
     global _keycloak_registry
-    return Response()
+
+    # log the request
+    if _logger:
+        _logger.debug(msg=_log_init(request=request))
+
+    # process the callback operation
+    errors: list[str] = []
+    token_data: tuple[str, str] = _service_callback(registry=_keycloak_registry,
+                                                    args=request.args,
+                                                    errors=errors,
+                                                    logger=_logger)
+    result: Response
+    if errors:
+        result = jsonify({"errors": "; ".join(errors)})
+        result.status_code = 400
+    else:
+        result = jsonify({
+            "user_id": token_data[0],
+            "access_token": token_data[1]})
+
+    # log the response
+    if _logger:
+        _logger.debug(msg=f"Response {result}")
+
+    return result
 
 
 # @flask_app.route(rule=<token_endpoint>,  # JUSBR_TOKEN_ENDPOINT: /iam/jusbr:get-token
@@ -188,26 +240,70 @@ def service_token() -> Response:
 
     :return: the response containing the token, or *UNAUTHORIZED*
     """
-    # retrieve user id
-    input_params: dict[str, Any] = request.args
-    _user_id: str = input_params.get("user-id") or input_params.get("login")
-    return Response()
+    global _keycloak_registry
+
+    # log the request
+    if _logger:
+        _logger.debug(msg=_log_init(request=request))
+
+    # retrieve the token
+    errors: list[str] = []
+    token: str = _service_token(registry=_keycloak_registry,
+                                args=request.args,
+                                errors=errors,
+                                logger=_logger)
+    result: Response
+    if token:
+        result = jsonify({"token": token})
+    else:
+        result = Response("; ".join(errors))
+        result.status_code = 401
+
+    # log the response
+    if _logger:
+        _logger.debug(msg=f"Response {result}")
+
+    return result
 
 
 def keycloak_get_token(user_id: str,
                        errors: list[str] = None,
                        logger: Logger = None) -> str:
     """
-    Retrieve the authentication token for user *user_id*.
+    Retrieve a Keycloak authentication token for *user_id*.
 
     :param user_id: the user's identification
-    :param errors: incidental error messages
+    :param errors: incidental errors
     :param logger: optional logger
-    :return: the token for *user_id*, or *None* if error
+    :return: the uthentication tokem
     """
     global _keycloak_registry
 
-    # initialize the return variable
-    result: str | None = None
-    return result
+    # retrieve the token
+    args: dict[str, Any] = {"user-id": user_id}
+    return _service_token(registry=_keycloak_registry,
+                          args=args,
+                          errors=errors,
+                          logger=logger)
 
+
+def keycloak_set_scope(user_id: str,
+                       scope: str,
+                       logger: Logger | None) -> None:
+    """
+    Set the OAuth2 scope of *user_id* to *scope*.
+
+    :param user_id: the user's identification
+    :param scope: the OAuth2 scope to set to the user
+    :param logger: optional logger
+    """
+    global _keycloak_registry
+
+    # retrieve user data
+    user_data: dict[str, Any] = _get_user_data(registry=_keycloak_registry,
+                                               user_id=user_id,
+                                               logger=logger)
+    # set the OAuth2 scope
+    user_data["oauth-scope"] = scope
+    if logger:
+        logger.debug(msg=f"Scope for user '{user_id}' set to '{scope}'")
