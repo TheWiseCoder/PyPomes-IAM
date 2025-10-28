@@ -1,17 +1,13 @@
 from cachetools import FIFOCache
 from datetime import datetime
-from flask import Flask, Response, redirect, request, jsonify
+from flask import Flask
 from logging import Logger
 from pypomes_core import (
     APP_PREFIX, TZ_LOCAL, env_get_int, env_get_str
 )
 from typing import Any, Final
 
-from .common_pomes import (
-    _service_login, _service_logout,
-    _service_callback, _service_token,
-    _get_user_data, _log_init
-)
+from .common_pomes import _service_token, _get_user_data
 
 JUSBR_CLIENT_ID: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CLIENT_ID")
 JUSBR_CLIENT_SECRET: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_CLIENT_SECRET")
@@ -59,7 +55,7 @@ JUSBR_URL_AUTH_CALLBACK: Final[str] = env_get_str(key=f"{APP_PREFIX}_JUSBR_URL_A
 _jusbr_registry: dict[str, Any] | None = None
 
 # dafault logger
-_logger: Logger | None = None
+_jusbr_logger: Logger | None = None
 
 
 def jusbr_setup(flask_app: Flask,
@@ -92,12 +88,13 @@ def jusbr_setup(flask_app: Flask,
     :param callback_url: URL for JusBR to callback on login
     :param logger: optional logger
     """
+    from .iam_pomes import service_login, service_logout, service_callback, service_token
+    global _jusbr_logger, _jusbr_registry
+
     # establish the logger
-    global _logger
     _logger = logger
 
     # configure the JusBR registry
-    global _jusbr_registry
     _jusbr_registry = {
         "client-id": client_id,
         "client-secret": client_secret,
@@ -110,11 +107,6 @@ def jusbr_setup(flask_app: Flask,
     }
 
     # establish the endpoints
-    if token_endpoint:
-        flask_app.add_url_rule(rule=token_endpoint,
-                               endpoint="jusbr-token",
-                               view_func=service_token,
-                               methods=["GET"])
     if login_endpoint:
         flask_app.add_url_rule(rule=login_endpoint,
                                endpoint="jusbr-login",
@@ -130,136 +122,11 @@ def jusbr_setup(flask_app: Flask,
                                endpoint="jusbr-callback",
                                view_func=service_callback,
                                methods=["GET", "POST"])
-
-
-# @flask_app.route(rule=<login_endpoint>,  # JUSBR_LOGIN_ENDPOINT: /iam/jusbr:login
-#                  methods=["GET"])
-def service_login() -> Response:
-    """
-    Entry point for the JusBR login service.
-
-    Redirect the request to the JusBR authentication page, with the appropriate parameters.
-
-    :return: the response from the redirect operation
-    """
-    global _jusbr_registry
-
-    # log the request
-    if _logger:
-        _logger.debug(msg=_log_init(request=request))
-
-    # obtain the redirect URL
-    auth_url: str = _service_login(registry=_jusbr_registry,
-                                   args=request.args,
-                                   logger=_logger)
-    # redirect the request
-    result: Response = redirect(location=auth_url)
-
-    # log the response
-    if _logger:
-        _logger.debug(msg=f"Response {result}")
-
-    return result
-
-
-# @flask_app.route(rule=<login_endpoint>,  # JUSBR_LOGIN_ENDPOINT: /iam/jusbr:logout
-#                  methods=["GET"])
-def service_logout() -> Response:
-    """
-    Entry point for the JusBR logout service.
-
-    Remove all data associating the user with JusBR from the registry.
-
-    :return: response *OK*
-    """
-    global _jusbr_registry
-
-    # log the request
-    if _logger:
-        _logger.debug(msg=_log_init(request=request))
-
-    # logout the user
-    _service_logout(registry=_jusbr_registry,
-                    args=request.args,
-                    logger=_logger)
-
-    result: Response = Response(status=200)
-
-    # log the response
-    if _logger:
-        _logger.debug(msg=f"Response {result}")
-
-    return result
-
-
-# @flask_app.route(rule=<callback_endpoint>,  # JUSBR_CALLBACK_ENDPOINT: /iam/jusbr:callback
-#                  methods=["GET", "POST"])
-def service_callback() -> Response:
-    """
-    Entry point for the callback from JusBR on authentication operation.
-
-    :return: the response containing the token, or *BAD REQUEST*
-    """
-    global _jusbr_registry
-
-    # log the request
-    if _logger:
-        _logger.debug(msg=_log_init(request=request))
-
-    # process the callback operation
-    errors: list[str] = []
-    token_data: tuple[str, str] = _service_callback(registry=_jusbr_registry,
-                                                    args=request.args,
-                                                    errors=errors,
-                                                    logger=_logger)
-    result: Response
-    if errors:
-        result = jsonify({"errors": "; ".join(errors)})
-        result.status_code = 400
-    else:
-        result = jsonify({
-            "user_id": token_data[0],
-            "access_token": token_data[1]})
-
-    # log the response
-    if _logger:
-        _logger.debug(msg=f"Response {result}")
-
-    return result
-
-
-# @flask_app.route(rule=<token_endpoint>,  # JUSBR_TOKEN_ENDPOINT: /iam/jusbr:get-token
-#                  methods=["GET"])
-def service_token() -> Response:
-    """
-    Entry point for retrieving the JusBR token.
-
-    :return: the response containing the token, or *UNAUTHORIZED*
-    """
-    global _jusbr_registry
-
-    # log the request
-    if _logger:
-        _logger.debug(msg=_log_init(request=request))
-
-    # retrieve the token
-    errors: list[str] = []
-    token: str = _service_token(registry=_jusbr_registry,
-                                args=request.args,
-                                errors=errors,
-                                logger=_logger)
-    result: Response
-    if token:
-        result = jsonify({"token": token})
-    else:
-        result = Response("; ".join(errors))
-        result.status_code = 401
-
-    # log the response
-    if _logger:
-        _logger.debug(msg=f"Response {result}")
-
-    return result
+    if token_endpoint:
+        flask_app.add_url_rule(rule=token_endpoint,
+                               endpoint="jusbr-token",
+                               view_func=service_token,
+                               methods=["GET"])
 
 
 def jusbr_get_token(user_id: str,
