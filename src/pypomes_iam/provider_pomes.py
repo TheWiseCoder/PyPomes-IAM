@@ -1,10 +1,30 @@
+import json
 import requests
 import sys
 from base64 import b64encode
 from datetime import datetime
+from enum import StrEnum
 from logging import Logger
 from pypomes_core import TZ_LOCAL, exc_format
-from typing import Any
+from threading import Lock
+from typing import Any, Final
+
+
+class ProviderParam(StrEnum):
+    """
+    Parameters for configuring a *JWT* token provider.
+    """
+    URL = "url"
+    USER = "user"
+    PWD = "pwd"
+    CUSTOM_AUTH = "custom-auth"
+    HEADER_DATA = "headers-data"
+    BODY_DATA = "body-data"
+    ACCESS_TOKEN = "access-token"
+    ACCESS_EXPIRATION = "access-expiration"
+    REFRESH_TOKEN = "refresh-token"
+    REFRESH_EXPIRATION = "refresh-expiration"
+
 
 # structure:
 # {
@@ -12,14 +32,20 @@ from typing import Any
 #      "url": <strl>,
 #      "user": <str>,
 #      "pwd": <str>,
-#      "basic-auth": <bool>,
+#      "custom-auth": <bool>,
 #      "headers-data": <dict[str, str]>,
 #      "body-data": <dict[str, str],
-#      "token": <str>,
-#      "expiration": <timestamp>
+#      "access-token": <str>,
+#      "access-expiration": <timestamp>,
+#      "refresh-token": <str>,
+#      "refresh-expiration": <timestamp>
 #    }
 # }
-_provider_registry: dict[str, dict[str, Any]] = {}
+_provider_registry: Final[dict[str, dict[str, Any]]] = {}
+
+# the lock protecting the data in '_provider_registry'
+# (because it is 'Final' and set at declaration time, it can be accessed through simple imports)
+_provider_lock: Final[Lock] = Lock()
 
 
 def provider_register(provider_id: str,
@@ -48,18 +74,21 @@ def provider_register(provider_id: str,
     :param headers_data: optional key-value pairs to be added to the request headers
     :param body_data: optional key-value pairs to be added to the request body
     """
-    global _provider_registry  # noqa: PLW0602
+    global _provider_registry
 
-    _provider_registry[provider_id] = {
-        "url": auth_url,
-        "user": auth_user,
-        "pwd": auth_pwd,
-        "custom-auth": custom_auth,
-        "headers-data": headers_data,
-        "body-data": body_data,
-        "token": None,
-        "expiration": datetime.now(tz=TZ_LOCAL).timestamp()
-    }
+    with _provider_lock:
+        _provider_registry[provider_id] = {
+            ProviderParam.URL: auth_url,
+            ProviderParam.USER: auth_user,
+            ProviderParam.PWD: auth_pwd,
+            ProviderParam.CUSTOM_AUTH: custom_auth,
+            ProviderParam.HEADER_DATA: headers_data,
+            ProviderParam.BODY_DATA: body_data,
+            ProviderParam.ACCESS_TOKEN: None,
+            ProviderParam.ACCESS_EXPIRATION: 0,
+            ProviderParam.REFRESH_TOKEN: None,
+            ProviderParam.REFRESH_EXPIRATION: 0
+        }
 
 
 def provider_get_token(provider_id: str,
@@ -78,53 +107,66 @@ def provider_get_token(provider_id: str,
     result: str | None = None
 
     err_msg: str | None = None
-    provider: dict[str, Any] = _provider_registry.get(provider_id)
-    if provider:
-        now: float = datetime.now(tz=TZ_LOCAL).timestamp()
-        if now > provider.get("expiration"):
-            user: str = provider.get("user")
-            pwd: str = provider.get("pwd")
-            headers_data: dict[str, str] = provider.get("headers-data") or {}
-            body_data: dict[str, str] = provider.get("body-data") or {}
-            custom_auth: tuple[str, str] = provider.get("custom-auth")
-            if custom_auth:
-                body_data[custom_auth[0]] = user
-                body_data[custom_auth[1]] = pwd
-            else:
-                enc_bytes: bytes = b64encode(f"{user}:{pwd}".encode())
-                headers_data["Authorization"] = f"Basic {enc_bytes.decode()}"
-            url: str = provider.get("url")
-            try:
-                # typical return on a token request:
-                # {
-                #   "token_type": "Bearer",
-                #   "access_token": <str>,
-                #   "expires_in": <number-of-seconds>,
-                #   optional data:
-                #   "refresh_token": <str>,
-                #   "refresh_expires_in": <number-of-seconds>
-                # }
-                response: requests.Response = requests.post(url=url,
-                                                            data=body_data,
-                                                            headers=headers_data,
-                                                            timeout=None)
-                if response.status_code < 200 or response.status_code >= 300:
-                    # request resulted in error, report the problem
-                    err_msg = (f"POST '{url}': failed, "
-                               f"status {response.status_code}, reason '{response.reason}'")
+    with _provider_lock:
+        provider: dict[str, Any] = _provider_registry.get(provider_id)
+        if provider:
+            now: float = datetime.now(tz=TZ_LOCAL).timestamp()
+            if now > provider.get(ProviderParam.ACCESS_EXPIRATION):
+                user: str = provider.get(ProviderParam.USER)
+                pwd: str = provider.get(ProviderParam.PWD)
+                headers_data: dict[str, str] = provider.get(ProviderParam.HEADER_DATA) or {}
+                body_data: dict[str, str] = provider.get(ProviderParam.BODY_DATA) or {}
+                custom_auth: tuple[str, str] = provider.get(ProviderParam.CUSTOM_AUTH)
+                if custom_auth:
+                    body_data[custom_auth[0]] = user
+                    body_data[custom_auth[1]] = pwd
                 else:
-                    reply: dict[str, Any] = response.json()
-                    provider["token"] = reply.get("access_token")
-                    provider["expiration"] = now + int(reply.get("expires_in"))
-                    if logger:
-                        logger.debug(msg=f"POST '{url}': status {response.status_code}")
-            except Exception as e:
-                # the operation raised an exception
-                err_msg = exc_format(exc=e,
-                                     exc_info=sys.exc_info())
-                err_msg = f"POST '{url}': error, '{err_msg}'"
-    else:
-        err_msg: str = f"Provider '{provider_id}' not registered"
+                    enc_bytes: bytes = b64encode(f"{user}:{pwd}".encode())
+                    headers_data["Authorization"] = f"Basic {enc_bytes.decode()}"
+                url: str = provider.get(ProviderParam.URL)
+                if logger:
+                    logger.debug(msg=f"POST {url}, {json.dumps(obj=body_data,
+                                                               ensure_ascii=False)}")
+                try:
+                    # typical return on a token request:
+                    # {
+                    #   "token_type": "Bearer",
+                    #   "access_token": <str>,
+                    #   "expires_in": <number-of-seconds>,
+                    #   optional data:
+                    #   "refresh_token": <str>,
+                    #   "refresh_expires_in": <number-of-seconds>
+                    # }
+                    response: requests.Response = requests.post(url=url,
+                                                                data=body_data,
+                                                                headers=headers_data,
+                                                                timeout=None)
+                    if response.status_code < 200 or response.status_code >= 300:
+                        # request resulted in error, report the problem
+                        err_msg = (f"POST failure, "
+                                   f"status {response.status_code}, reason {response.reason}")
+                    else:
+                        # request succeeded
+                        if logger:
+                            logger.debug(msg=f"POST success, status {response.status_code}")
+                        reply: dict[str, Any] = response.json()
+                        provider[ProviderParam.ACCESS_TOKEN] = reply.get("access_token")
+                        provider[ProviderParam.ACCESS_EXPIRATION] = now + int(reply.get("expires_in"))
+                        if reply.get(ProviderParam.REFRESH_TOKEN):
+                            provider[ProviderParam.REFRESH_TOKEN] = reply["refresh_token"]
+                            if reply.get("refresh_expires_in"):
+                                provider[ProviderParam.REFRESH_EXPIRATION] = now + int(reply.get("refresh_expires_in"))
+                            else:
+                                provider[ProviderParam.REFRESH_EXPIRATION] = sys.maxsize
+                        if logger:
+                            logger.debug(msg=f"POST {url}: status {response.status_code}")
+                except Exception as e:
+                    # the operation raised an exception
+                    err_msg = exc_format(exc=e,
+                                         exc_info=sys.exc_info())
+                    err_msg = f"POST error, '{err_msg}'"
+        else:
+            err_msg: str = f"Provider '{provider_id}' not registered"
 
     if err_msg:
         if isinstance(errors, list):
@@ -132,7 +174,7 @@ def provider_get_token(provider_id: str,
         if logger:
             logger.error(msg=err_msg)
     else:
-        result = provider.get("token")
+        result = provider.get(ProviderParam.ACCESS_TOKEN)
 
     return result
 
