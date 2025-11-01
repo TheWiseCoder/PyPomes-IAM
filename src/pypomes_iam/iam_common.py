@@ -155,7 +155,7 @@ def __get_iam_data() -> dict[IamServer, dict[IamParam, Any]]:
 #      "refresh-token": <str>
 #      "access-expiration": <timestamp>,
 #      "refresh-expiration": <timestamp>,
-#      # transient attributes:
+#      # transient attributes
 #      "login-expiration": <timestamp>,
 #      "login-id": <str>,
 #      "redirect-uri": <str>
@@ -181,15 +181,15 @@ def _iam_server_from_endpoint(endpoint: str,
     :param logger: optional logger
     :return: the corresponding *IAM* server, or *None* if one could not be obtained
     """
-    # declare the return variable
-    result: IamServer | None
+    # initialize the return variable
+    result: IamServer | None = None
 
-    if endpoint.startswith("jusbr"):
-        result = IamServer.JUSRBR
-    elif endpoint.startswith("keycloak"):
-        result = IamServer.KEYCLOAK
-    else:
-        result = None
+    for iam_server in _IAM_SERVERS:
+        if endpoint.startswith(iam_server):
+            result = IamServer.JUSRBR
+            break
+
+    if not result:
         msg: str = f"Unable to find a IAM server to service endpoint '{endpoint}'"
         if logger:
             logger.error(msg=msg)
@@ -277,7 +277,7 @@ def _get_public_key(iam_server: IamServer,
                                                  logger=logger)
     if registry:
         now: int = int(datetime.now(tz=TZ_LOCAL).timestamp())
-        if now > registry["pk-expiration"]:
+        if now > registry[IamParam.PK_EXPIRATION]:
             # obtain the JWKS (JSON Web Key Set) from the token issuer
             base_url: str = f"{registry[IamParam.URL_BASE]}/realms/{registry[IamParam.CLIENT_REALM]}"
             url: str = f"{base_url}/protocol/openid-connect/certs"
@@ -301,9 +301,9 @@ def _get_public_key(iam_server: IamServer,
                         # convert from 'JWK' to 'PEM' and save it for further use
                         result = crypto_jwk_convert(jwk=jwk,
                                                     fmt="PEM")
-                        registry["public-key"] = result
-                        lifetime: int = registry["pk-lifetime"] or 0
-                        registry["pk-expiration"] = now + lifetime if lifetime else sys.maxsize
+                        registry[IamParam.PUBLIC_KEY] = result
+                        lifetime: int = registry[IamParam.PK_LIFETIME] or 0
+                        registry[IamParam.PK_EXPIRATION] = now + lifetime if lifetime else sys.maxsize
                         if logger:
                             logger.debug("Public key obtained and saved")
                     else:
@@ -328,7 +328,7 @@ def _get_public_key(iam_server: IamServer,
                 if isinstance(errors, list):
                     errors.append(msg)
         else:
-            result = registry["public-key"]
+            result = registry[IamParam.PUBLIC_KEY]
 
     return result
 
@@ -441,4 +441,4 @@ def _get_iam_users(iam_server: IamServer,
     registry: dict[str, Any] = _get_iam_registry(iam_server=iam_server,
                                                  errors=errors,
                                                  logger=logger)
-    return registry["users"] if registry else None
+    return registry[IamParam.USERS] if registry else None
