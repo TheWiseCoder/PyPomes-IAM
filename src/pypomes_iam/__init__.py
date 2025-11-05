@@ -6,16 +6,19 @@ from .iam_common import (
     IamServer, IamParam
 )
 from .iam_pomes import (
-    iam_setup, iam_get_token
+    iam_setup_server, iam_setup_endpoints
 )
 from .iam_services import (
-     jwt_required, logger_register
+    jwt_required, iam_setup_logger,
+    service_login, service_logout, service_callback,
+    service_exchange, service_callback_and_exchange, service_token
 )
 from .provider_pomes import (
-    provider_register, provider_get_token
+    provider_setup_server, provider_setup_endpoint, provider_setup_logger,
+    service_jwt_token, action_jwt_token
 )
 from .token_pomes import (
-    token_validate
+    token_get_claims, token_get_values, token_validate
 )
 
 __all__ = [
@@ -25,13 +28,15 @@ __all__ = [
     # iam_commons
     "IamServer", "IamParam",
     # iam_pomes
-    "iam_setup", "iam_get_token",
+    "iam_setup_server", "iam_setup_endpoints",
     # iam_services
-    "jwt_required", "logger_register",
+    "jwt_required", "iam_setup_logger",
+    "service_login", "service_logout", "service_callback",
+    "service_exchange", "service_callback_and_exchange", "service_token",
     # provider_pomes
-    "provider_register", "provider_get_token",
+    "provider_setup_server", "action_jwt_token",
     # token_pomes
-    "token_validate"
+    "token_get_claims", "token_get_values", "token_validate"
 ]
 
 from importlib.metadata import version

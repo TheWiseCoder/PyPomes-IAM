@@ -46,6 +46,33 @@ def token_get_claims(token: str,
     return result
 
 
+def token_get_values(token: str,
+                     keys: tuple[str, ...],
+                     errors: list[str] = None,
+                     logger: Logger = None) -> tuple:
+    """
+    Retrieve the values of *keys* in the token's payload.
+
+    Ther values are returned in the same order as requested in *keys*.
+    For a claim not found, *None* is returned in its position.
+
+    :param token: the reference token
+    :param keys: the names of the claims whose values are to be returned
+    :param errors: incidental errors
+    :param logger: optiona logger
+    :return: a tuple containing the respective values of *claims* in *token*.
+    """
+    token_claims: dict[str, dict[str, Any]] = token_get_claims(token=token,
+                                                               errors=errors,
+                                                               logger=logger)
+    payload: dict[str, Any] = token_claims["payload"]
+    values: list[Any] = []
+    for key in keys:
+        values.append(payload.get(key))
+
+    return tuple(values)
+
+
 def token_validate(token: str,
                    issuer: str = None,
                    recipient_id: str = None,

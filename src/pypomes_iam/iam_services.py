@@ -60,6 +60,7 @@ def __request_validate(request: Request) -> Response:
         claims: dict[str, Any] = token_get_claims(token=token)
         if claims:
             issuer: str = claims["payload"].get("iss")
+            public_key: str | None = None
             recipient_attr: str | None = None
             recipient_id: str = request.values.get("user-id") or request.values.get("login")
             with _iam_lock:
@@ -74,17 +75,17 @@ def __request_validate(request: Request) -> Response:
                                                                      logger=__IAM_LOGGER)
                         if registry:
                             recipient_attr = registry[IamParam.RECIPIENT_ATTR]
-                    public_key: str = _get_public_key(iam_server=iam_server,
-                                                      errors=None,
-                                                      logger=__IAM_LOGGER)
+                    public_key = _get_public_key(iam_server=iam_server,
+                                                 errors=None,
+                                                 logger=__IAM_LOGGER)
             # validate the token (log errors, only)
             errors: list[str] = []
-            if public_key and token_validate(token=token,
-                                             issuer=issuer,
-                                             recipient_id=recipient_id,
-                                             recipient_attr=recipient_attr,
-                                             public_key=public_key,
-                                             errors=errors):
+            if token_validate(token=token,
+                              issuer=issuer,
+                              recipient_id=recipient_id,
+                              recipient_attr=recipient_attr,
+                              public_key=public_key,
+                              errors=errors):
                 # token is valid
                 bad_token = False
             elif __IAM_LOGGER:
@@ -99,7 +100,7 @@ def __request_validate(request: Request) -> Response:
     return result
 
 
-def logger_register(logger: Logger) -> None:
+def iam_setup_logger(logger: Logger) -> None:
     """
     Register the logger for HTTP services.
 
@@ -109,17 +110,20 @@ def logger_register(logger: Logger) -> None:
     __IAM_LOGGER = logger
 
 
-# @flask_app.route(rule=<login_endpoint>,  # JUSBR_ENDPOINT_LOGIN
-#                  methods=["GET"])
-# @flask_app.route(rule=<login_endpoint>,  # KEYCLOAK_ENDPOINT_LOGIN
+# @flask_app.route(rule=<login_endpoint>,  # IAM_ENDPOINT_LOGIN
 #                  methods=["GET"])
 def service_login() -> Response:
     """
     Entry point for the IAM server's login service.
 
+    When registering this endpoint, the name used in *Flask*'s *endpoint* parameter must be prefixed with
+    the name of the *IAM* server in charge of handling this service. This prefixing is done automatically
+    if the endpoint is established with a call to *iam_setup_endpoints()*.
+
     These are the expected request parameters:
         - user-id: optional, identifies the reference user (alias: 'login')
         - redirect-uri: a parameter to be added to the query part of the returned URL
+        -target-idp: optionally, identify a target identity provider for the login operation
 
     If provided, the user identification will be validated against the authorization data
     returned by *iam_server* upon login. On success, the following JSON, containing the appropriate
@@ -157,18 +161,20 @@ def service_login() -> Response:
 
     # log the response
     if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=f"Response {result}, {result.get_data(as_text=True)}")
+        __IAM_LOGGER.debug(msg=f"Response {result}; {result.get_data(as_text=True)}")
 
     return result
 
 
-# @flask_app.route(rule=<logout_endpoint>,  # JUSBR_ENDPOINT_LOGOUT
-#                  methods=["GET"])
-# @flask_app.route(rule=<login_endpoint>,   # KEYCLOAK_ENDPOINT_LOGOUT
+# @flask_app.route(rule=<logout_endpoint>,  # IAM_ENDPOINT_LOGOUT
 #                  methods=["GET"])
 def service_logout() -> Response:
     """
-    Entry point for the JusBR logout service.
+    Entry point for the IAM server's logout service.
+
+    When registering this endpoint, the name used in *Flask*'s *endpoint* parameter must be prefixed with
+    the name of the *IAM* server in charge of handling this service. This prefixing is done automatically
+    if the endpoint is established with a call to *iam_setup_endpoints()*.
 
     The user is identified by the attribute *user-id* or "login", provided as a request parameter.
     If successful, remove all data relating to the user from the *IAM* server's registry.
@@ -201,20 +207,22 @@ def service_logout() -> Response:
     else:
         result = Response(status=204)
 
-    # log the response
     if __IAM_LOGGER:
+        # log the response
         __IAM_LOGGER.debug(msg=f"Response {result}")
 
     return result
 
 
-# @flask_app.route(rule=<callback_endpoint>,  # JUSBR_ENDPOINT_CALLBACK
+# @flask_app.route(rule=<callback_endpoint>,  # IAM_ENDPOINT_CALLBACK
 #                  methods=["GET", "POST"])
-# @flask_app.route(rule=<callback_endpoint>,  # KEYCLOAK_ENDPOINT_CALLBACK
-#                  methods=["POST"])
 def service_callback() -> Response:
     """
-    Entry point for the callback from JusBR on authentication operation.
+    Entry point for the callback from the IAM server on authentication operation.
+
+    When registering this endpoint, the name used in *Flask*'s *endpoint* parameter must be prefixed with
+    the name of the *IAM* server in charge of handling this service. This prefixing is done automatically
+    if the endpoint is established with a call to *iam_setup_endpoints()*.
 
     This callback is invoked from a front-end application after a successful login at the
     *IAM* server's login page, forwarding the data received. In a typical OAuth2 flow faction,
@@ -263,13 +271,147 @@ def service_callback() -> Response:
     return result
 
 
-# @flask_app.route(rule=<token_endpoint>,  # JUSBR_ENDPOINT_TOKEN
+# @flask_app.route(rule=<callback_endpoint>,  # KEYCLOAK_ENDPOINT_EXCHANGE
+#                  methods=["POST"])
+def service_exchange() -> Response:
+    """
+    Entry point for requesting the *IAM* server to exchange the token.
+
+    When registering this endpoint, the name used in *Flask*'s *endpoint* parameter must be prefixed with
+    the name of the *IAM* server in charge of handling this service. This prefixing is done automatically
+    if the endpoint is established with a call to *iam_setup_endpoints()*.
+
+    If the exchange is successful, the token data is stored in the *IAM* server's registry, and returned.
+    Otherwise, *errors* will contain the appropriate error message.
+
+    The expected request parameters are:
+        - user-id: identification for the reference user (alias: 'login')
+        - access-token: the token to be exchanged
+
+    On success, the returned *Response* will contain the following JSON:
+        {
+            "user-id": <reference-user-identification>,
+            "access-token": <the-exchanged-token>
+        }
+
+    :return: *Response* containing the reference user identification and the token, or *BAD REQUEST*
+    """
+    # log the request
+    if __IAM_LOGGER:
+        __IAM_LOGGER.debug(msg=_log_init(request=request))
+
+    errors: list[str] = []
+    with _iam_lock:
+        # retrieve the IAM server
+        iam_server: IamServer = _iam_server_from_endpoint(endpoint=request.endpoint,
+                                                          errors=errors,
+                                                          logger=__IAM_LOGGER)
+        # exchange the token
+        token_info: tuple[str, str] | None = None
+        if iam_server:
+            errors: list[str] = []
+            token_info = action_exchange(iam_server=iam_server,
+                                         args=request.args,
+                                         errors=errors,
+                                         logger=__IAM_LOGGER)
+    result: Response
+    if errors:
+        result = Response(response="; ".join(errors),
+                          status=400)
+    else:
+        result = jsonify({"user-id": token_info[0],
+                          "access-token": token_info[1]})
+    if __IAM_LOGGER:
+        # log the response (the returned data is not logged, as it contains the token)
+        __IAM_LOGGER.debug(msg=f"Response {result}; {result.get_data(as_text=True)}")
+
+    return result
+
+
+# @flask_app.route(rule=/iam/jusbr:callback,
 #                  methods=["GET"])
-# @flask_app.route(rule=<token_endpoint>,  # KEYCLOAK_ENDPOINT_TOKEN
+def service_callback_and_exchange() -> Response:
+    """
+    Entry point for the callback from the IAM server on authentication operation, with subsequent token exchange.
+
+    When registering this endpoint, the name used in *Flask*'s *endpoint* parameter must be prefixed with
+    the name of the *IAM* server in charge of handling this service, and suffixed with the string *_to_*
+    followed by the name of the *IAM* server in charge of the token exchange. The prefixing, but not the suffixing,
+    is done automatically if the endpoint is established with a call to *iam_setup_endpoints()*.
+
+    This callback is invoked from a front-end application after a successful login at the
+    *IAM* server's login page, forwarding the data received. In a typical OAuth2 flow faction,
+    this data is then used to effectively obtain the token from the *IAM* server.
+    This token is stored and thereafter, a corresponding token is requested from another IAM *server*,
+    in a scheme known as "token exchange". This new token, along with the reference user identification,
+    are then stored. Note that the original token is the one actually returned.
+
+    The relevant expected request arguments are:
+        - *state*: used to enhance security during the authorization process, typically to provide *CSRF* protection
+        - *code*: the temporary authorization code provided by the IAM server, to be exchanged for the token
+
+    On success, the returned *Response* will contain the following JSON:
+        {
+            "user-id": <reference-user-identification>,
+            "access-token": <the-original-token>
+        }
+
+    :return: *Response* containing the reference user identification and the token, or *BAD REQUEST*
+    """
+    # declare the return variable
+    result: Response | None = None
+
+    # log the request
+    if __IAM_LOGGER:
+        __IAM_LOGGER.debug(msg=_log_init(request=request))
+
+    errors: list[str] = []
+    with _iam_lock:
+        # retrieve the IAM server
+        iam_server: IamServer = _iam_server_from_endpoint(endpoint=request.endpoint,
+                                                          errors=errors,
+                                                          logger=__IAM_LOGGER)
+        # obtain the login URL
+        token_info: tuple[str,  str] = action_callback(iam_server=iam_server,
+                                                       args=request.args,
+                                                       errors=errors,
+                                                       logger=__IAM_LOGGER)
+        if token_info:
+            args: dict[str, str] = {
+                "user-id": token_info[0],
+                "access-token": token_info[1]
+            }
+            # retrieve the exchange IAM server
+            pos: int = request.endpoint.index("_to_")
+            exchange_server: IamServer = _iam_server_from_endpoint(endpoint=request.endpoint[pos+4],
+                                                                   errors=errors,
+                                                                   logger=__IAM_LOGGER)
+            token_info = action_exchange(iam_server=exchange_server,
+                                         args=args,
+                                         logger=__IAM_LOGGER)
+            if token_info:
+                result = jsonify({"user-id": token_info[0],
+                                  "access-token": token_info[1]})
+    if errors:
+        result = Response("; ".join(errors))
+        result.status_code = 400
+
+    if __IAM_LOGGER:
+        # log the response (the returned data is not logged, as it contains the token)
+        __IAM_LOGGER.debug(msg=f"Response {result}")
+
+    return result
+
+
+# @flask_app.route(rule=<token_endpoint>,  # IAM_ENDPOINT_TOKEN
 #                  methods=["GET"])
 def service_token() -> Response:
     """
     Entry point for retrieving a token from the *IAM* server.
+
+    When registering this endpoint, the name used in *Flask*'s *endpoint* parameter must be prefixed with
+    the name of the *IAM* server in charge of handling this service. This prefixing is done automatically
+    if the endpoint is established with a call to *iam_setup_endpoints()*.
 
     The user is identified by the attribute *user-id* or "login", provided as a request parameter.
 
@@ -320,63 +462,6 @@ def service_token() -> Response:
     if __IAM_LOGGER:
         # log the response (the returned data is not logged, as it contains the token)
         __IAM_LOGGER.debug(msg=f"Response {result}")
-
-    return result
-
-
-# @flask_app.route(rule=<callback_endpoint>,  # KEYCLOAK_ENDPOINT_EXCHANGE
-#                  methods=["POST"])
-def service_exchange() -> Response:
-    """
-    Entry point for requesting the *IAM* server to exchange the token.
-
-    This is currently limited to the *KEYCLOAK* server. The token itself is stored in *KEYCLOAK*'s registry.
-    The expected request parameters are:
-        - user-id: identification for the reference user (alias: 'login')
-        - access-token: the token to be exchanged
-
-    If the exchange is successful, the token data is stored in the *IAM* server's registry, and returned.
-    Otherwise, *errors* will contain the appropriate error message.
-
-    On success, the typical *Response* returned will contain the following attributes:
-        {
-            "token_type": "Bearer",
-            "access_token": <str>,
-            "expires_in": <number-of-seconds>,
-            "refresh_token": <str>,
-            "refesh_expires_in": <number-of-seconds>
-        }
-
-    :return: *Response* containing the token data, or *BAD REQUEST*
-    """
-    # log the request
-    if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=_log_init(request=request))
-
-    errors: list[str] = []
-    with _iam_lock:
-        # retrieve the IAM server (currently, only 'IAM_KEYCLOAK' is supported)
-        iam_server: IamServer = _iam_server_from_endpoint(endpoint=request.endpoint,
-                                                          errors=errors,
-                                                          logger=__IAM_LOGGER)
-        # exchange the token
-        token_data: dict[str, Any] | None = None
-        if iam_server:
-            errors: list[str] = []
-            token_data = action_exchange(iam_server=iam_server,
-                                         args=request.args,
-                                         errors=errors,
-                                         logger=__IAM_LOGGER)
-    result: Response
-    if errors:
-        result = Response(response="; ".join(errors),
-                          status=400)
-    else:
-        result = jsonify(token_data)
-
-    # log the response
-    if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=f"Response {result}, {result.get_data(as_text=True)}")
 
     return result
 

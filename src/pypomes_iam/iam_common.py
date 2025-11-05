@@ -4,8 +4,8 @@ from datetime import datetime
 from enum import StrEnum, auto
 from logging import Logger
 from pypomes_core import (
-    APP_PREFIX, TZ_LOCAL,
-    env_get_int, env_get_str, env_get_enum, env_get_enums, exc_format
+    APP_PREFIX, TZ_LOCAL, exc_format,
+    env_get_str,  env_get_int, env_get_enums
 )
 from pypomes_crypto import crypto_jwk_convert
 from threading import RLock
@@ -16,7 +16,7 @@ class IamServer(StrEnum):
     """
     Supported IAM servers.
     """
-    JUSRBR = auto()
+    JUSBR = auto()
     KEYCLOAK = auto()
 
 
@@ -29,12 +29,12 @@ class IamParam(StrEnum):
     CLIENT_ID = "client-id"
     CLIENT_REALM = "client-realm"
     CLIENT_SECRET = "client-secret"
-    CLIENT_TIMEOUT = "client-timeout"
     ENDPOINT_CALLBACK = "endpoint-callback"
     ENDPOINT_LOGIN = "endpoint-login"
     ENDPOINT_LOGOUT = "endpoint_logout"
     ENDPOINT_TOKEN = "endpoint-token"
     ENDPOINT_EXCHANGE = "endpoint-exchange"
+    LOGIN_TIMEOUT = "login-timeout"
     PK_EXPIRATION = "pk-expiration"
     PK_LIFETIME = "pk-lifetime"
     PUBLIC_KEY = "public-key"
@@ -59,74 +59,58 @@ class UserParam(StrEnum):
 
 def __get_iam_data() -> dict[IamServer, dict[IamParam, Any]]:
     """
-    Establish the configuration data for select *IAM* servers, from environment variables.
+    Obtain the configuration data for select *IAM* servers.
 
-    The preferred way to specify configuration parameters is dynamically with *iam_setup()*;.
-    Specifying configuration parameters with environment variables can be done in two ways:
+    The configuration parameters for the IAM servers are specified dynamically with environment variables,
+    or dynamically with calls to *iam_setup_server()*. Specifying configuration parameters with environment
+    variables can be done by following these steps:
 
-    1. for a single *IAM* server, specify the data set
-          - *<APP_PREFIX>_IAM_SERVER*               (required, one of *jusbr*, *keycloak*)
-          - *<APP_PREFIX>_IAM_ADMIN_ID*             (optional, needed only if administrative duties are performed)
-          - *<APP_PREFIX>_IAM_ADMIN_PWD*            (optional, needed only if administrative duties are performed)
-          - *<APP_PREFIX>_IAM_CLIENT_ID*            (required)
-          - *<APP_PREFIX>_IAM_CLIENT_REALM*         (required)
-          - *<APP_PREFIX>_IAM_CLIENT_SECRET*        (required)
-          - *<APP_PREFIX>_IAM_CLIENT_TIMEOUT*       (optional, defaults to no timeout)
-          - *<APP_PREFIX>_IAM_ENDPOINT_CALLBACK*    (optional)
-          - *<APP_PREFIX>_IAM_ENDPOINT_LOGIN*       (optional)
-          - *<APP_PREFIX>_IAM_ENDPOINT_LOGOUT*      (optional)
-          - *<APP_PREFIX>_IAM_ENDPOINT_TOKEN*       (optional)
-          - *<APP_PREFIX>_IAM_ENDPOINT_EXCHANGE*    (optional)
-          - *<APP_PREFIX>_IAM_PK_LIFETIME*          (optional, defaults to non-terminating lifetime)
-          - *<APP_PREFIX>_IAM_RECIPIENT_ATTR*       (required)
-          - *<APP_PREFIX>_IAM_URL_BASE*             (required)
+    1. Specify *<APP_PREFIX>_IAM_SERVERS* with a list of names among the values found in *IamServer* class
+       (currently, *jusbr* and *keycloak* are supported), and the data set below for each server, where
+       *<IAM>* stands for the server's name as presented in *IamServer* class:
+          - *<APP_PREFIX>_<IAM>_ADMIN_ID*           (optional, required if administrative duties are performed)
+          - *<APP_PREFIX>_<IAM>_ADMIN_PWD*          (optional, required if administrative duties are performed)
+          - *<APP_PREFIX>_<IAM>_CLIENT_ID*          (required)
+          - *<APP_PREFIX>_<IAM>_CLIENT_REALM*       (required)
+          - *<APP_PREFIX>_<IAM>_CLIENT_SECRET*      (required)
+          - *<APP_PREFIX>_<IAM>_LOGIN_TIMEOUT*      (optional, defaults to no timeout)
+          - *<APP_PREFIX>_<IAM>_PK_LIFETIME*        (optional, defaults to non-terminating lifetime)
+          - *<APP_PREFIX>_<IAM>_RECIPIENT_ATTR*     (required)
+          - *<APP_PREFIX>_<IAM>_URL_BASE*           (required)
 
-    2. the parameters *PUBLIC_KEY*, *PK_EXPIRATION*, and *USERS* cannot be assigned values,
-       as they are reserved for internal use
+    2. A group of special environment variables identifying endpoints for authentication services may be specified,
+       following the same scheme as presented in item *1* above. These are not part of the *IAM* server's setup,
+       but are meant to be used by function *iam_setup_endpoints()*, wherein the values in those variables
+       would represent default values for its parameters, respectively:
+          - *<APP_PREFIX>_<IAM>_ENDPOINT_CALLBACK*
+          - *<APP_PREFIX>_<IAM>_ENDPOINT_EXCHANGE*
+          - *<APP_PREFIX>_<IAM>_ENDPOINT_LOGIN*
+          - *<APP_PREFIX>_<IAM>_ENDPOINT_LOGOUT*
+          - *<APP_PREFIX>_<IAM>_ENDPOINT_TOKEN*
 
-    3. for multiple *IAM* servers, specify a comma-separated list of servers in
-       *<APP_PREFIX>_IAM_SERVERS*, and for each server, specify the data set above,
-       respectively replacing *_IAM_* with *_JUSBR_* or *_KEYCLOAK_*, for the servers listed above
-
-    :return: the configuration data for the selected *IAM* servers
+    :return: the configuration data for the select *IAM* servers.
     """
-    # initialize the return valiable
+    # initialize the return variable
     result: dict[IamServer, dict[IamParam, Any]] = {}
 
-    servers: list[IamServer] = []
-    single_server: IamServer = env_get_enum(key=f"{APP_PREFIX}_IAM_SERVER",
-                                            enum_class=IamServer)
-    if single_server:
-        default_setup: bool = True
-        servers.append(single_server)
-    else:
-        default_setup: bool = False
-        multi_servers: list[IamServer] = env_get_enums(key=f"{APP_PREFIX}_IAM_SERVERS",
-                                                       enum_class=IamServer)
-        if multi_servers:
-            servers.extend(multi_servers)
-
+    servers: list[IamServer] = env_get_enums(key=f"{APP_PREFIX}_IAM_SERVERS",
+                                             enum_class=IamServer) or []
     for server in servers:
-        if default_setup:
-            prefix: str = "IAM"
-            default_setup = False
-        else:
-            prefix: str = server
+        prefix = server.name
         result[server] = {
             IamParam.ADMIN_ID: env_get_str(key=f"{APP_PREFIX}_{prefix}_ADMIN_ID"),
-            IamParam.ADMIN_SECRET: env_get_str(key=f"{APP_PREFIX}_{prefix}_ADMIN_PWD"),
+            IamParam.ADMIN_SECRET: env_get_str(key=f"{APP_PREFIX}_{prefix}_ADMIN_SECRET"),
             IamParam.CLIENT_ID: env_get_str(key=f"{APP_PREFIX}_{prefix}_CLIENT_ID"),
             IamParam.CLIENT_REALM: env_get_str(key=f"{APP_PREFIX}_{prefix}_CLIENT_REALM"),
             IamParam.CLIENT_SECRET: env_get_str(key=f"{APP_PREFIX}_{prefix}_CLIENT_SECRET"),
-            IamParam.CLIENT_TIMEOUT: env_get_int(key=f"{APP_PREFIX}_{prefix}_CLIENT_TIMEOUT"),
-            IamParam.ENDPOINT_CALLBACK: env_get_str(key=f"{APP_PREFIX}_{prefix}_ENDPOINT_CALLBACK"),
-            IamParam.ENDPOINT_LOGIN: env_get_str(key=f"{APP_PREFIX}_{prefix}_ENDPOINT_LOGIN"),
-            IamParam.ENDPOINT_LOGOUT: env_get_str(key=f"{APP_PREFIX}_{prefix}_ENDPOINT_LOGOUT"),
-            IamParam.ENDPOINT_TOKEN: env_get_str(key=f"{APP_PREFIX}_{prefix}_ENDPOINT_TOKEN"),
-            IamParam.ENDPOINT_EXCHANGE: env_get_str(key=f"{APP_PREFIX}_{prefix}_ENDPOINT_EXCHANGE"),
-            IamParam.PK_LIFETIME: env_get_str(key=f"{APP_PREFIX}_{prefix}_PK_LIFETIME"),
+            IamParam.LOGIN_TIMEOUT: env_get_str(key=f"{APP_PREFIX}_{prefix}_LOGIN_TIMEOUT"),
+            IamParam.PK_LIFETIME: env_get_int(key=f"{APP_PREFIX}_{prefix}_PUBLIC_KEY_LIFETIME"),
             IamParam.RECIPIENT_ATTR: env_get_str(key=f"{APP_PREFIX}_{prefix}_RECIPIENT_ATTR"),
-            IamParam.URL_BASE: env_get_str(key=f"{APP_PREFIX}_{prefix}_URL_BASE")
+            IamParam.URL_BASE: env_get_str(key=f"{APP_PREFIX}_{prefix}_URL_AUTH_BASE"),
+            # dynamically set
+            IamParam.PK_EXPIRATION: 0,
+            IamParam.PUBLIC_KEY: None,
+            IamParam.USERS: {}
         }
 
     return result
@@ -136,6 +120,8 @@ def __get_iam_data() -> dict[IamServer, dict[IamParam, Any]]:
 # { <IamServer>:
 #    {
 #       "base-url": <str>,
+#       "admin-id": <str>,
+#       "admin-secret": <str>,
 #       "client-id": <str>,
 #       "client-secret": <str>,
 #       "client-realm": <str,
@@ -165,7 +151,7 @@ def __get_iam_data() -> dict[IamServer, dict[IamParam, Any]]:
 _IAM_SERVERS: Final[dict[IamServer, dict[IamParam, Any]]] = __get_iam_data()
 
 
-# the lock protecting the data in '_IAM_SERVERS'
+# the lock protecting the data in '_<IAM>_SERVERS'
 # (because it is 'Final' and set at declaration time, it can be accessed through simple imports)
 _iam_lock: Final[RLock] = RLock()
 
@@ -186,7 +172,7 @@ def _iam_server_from_endpoint(endpoint: str,
 
     for iam_server in _IAM_SERVERS:
         if endpoint.startswith(iam_server):
-            result = IamServer.JUSRBR
+            result = iam_server
             break
 
     if not result:
@@ -408,21 +394,15 @@ def _get_iam_registry(iam_server: IamServer,
     :param logger: optional logger
     :return: the registry associated with *iam_server*, or *None* if the server is unknown
     """
-    # declare the return variable
-    result: dict[str, Any] | None
+    # assign the return variable
+    result: dict[str, Any] = _IAM_SERVERS.get(iam_server)
 
-    match iam_server:
-        case IamServer.JUSRBR:
-            result = _IAM_SERVERS[IamServer.JUSRBR]
-        case IamServer.KEYCLOAK:
-            result = _IAM_SERVERS[IamServer.KEYCLOAK]
-        case _:
-            result = None
-            msg = f"Unknown IAM server '{iam_server}'"
-            if logger:
-                logger.error(msg=msg)
-            if isinstance(errors, list):
-                errors.append(msg)
+    if not result:
+        msg = f"Unknown IAM server '{iam_server}'"
+        if logger:
+            logger.error(msg=msg)
+        if isinstance(errors, list):
+            errors.append(msg)
 
     return result
 
