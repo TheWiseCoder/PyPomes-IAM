@@ -1,35 +1,33 @@
-import requests
 import sys
 from datetime import datetime
-from enum import StrEnum, auto
+from enum import StrEnum
 from logging import Logger
 from pypomes_core import (
-    APP_PREFIX, TZ_LOCAL, exc_format,
-    env_get_str,  env_get_int, env_get_enums
+    APP_PREFIX, TZ_LOCAL,
+    env_get_int, env_get_str, env_get_strs
 )
-from pypomes_crypto import crypto_jwk_convert
+from pypomes_crypto import jwt_get_public_key
 from threading import RLock
 from typing import Any, Final
 
-
-class IamServer(StrEnum):
-    """
-    Supported IAM servers.
-    """
-    JUSBR = auto()
-    KEYCLOAK = auto()
+_members: dict[str, str] = {key.upper(): key.lower() for key in
+                            env_get_strs(key=f"{APP_PREFIX}_AUTH_SERVERS")}
+IamServer: type[StrEnum] = StrEnum("IamServer", _members)
+del _members
 
 
-class IamParam(StrEnum):
+class ServerParam(StrEnum):
     """
     Parameters for configuring *IAM* servers.
     """
+
     ADMIN_ID = "admin-id"
     ADMIN_SECRET = "admin-secret"
     CLIENT_ID = "client-id"
     CLIENT_REALM = "client-realm"
     CLIENT_SECRET = "client-secret"
     ENDPOINT_CALLBACK = "endpoint-callback"
+    ENDPOINT_CALLBACK_EXCHANGE = "endpoint-callback-exchange"
     ENDPOINT_LOGIN = "endpoint-login"
     ENDPOINT_LOGOUT = "endpoint_logout"
     ENDPOINT_TOKEN = "endpoint-token"
@@ -37,8 +35,9 @@ class IamParam(StrEnum):
     LOGIN_TIMEOUT = "login-timeout"
     PK_EXPIRATION = "pk-expiration"
     PK_LIFETIME = "pk-lifetime"
-    PUBLIC_KEY = "public-key"
     RECIPIENT_ATTR = "recipient-attr"
+    # dynamic attributes
+    PUBLIC_KEY = "public-key"
     URL_BASE = "url-base"
     USERS = "users"
 
@@ -57,7 +56,7 @@ class UserParam(StrEnum):
     REDIRECT_URI = "redirect-uri"
 
 
-def __get_iam_data() -> dict[IamServer, dict[IamParam, Any]]:
+def __get_iam_data() -> dict[IamServer, dict[ServerParam, Any]]:
     """
     Obtain the configuration data for select *IAM* servers.
 
@@ -65,9 +64,9 @@ def __get_iam_data() -> dict[IamServer, dict[IamParam, Any]]:
     or dynamically with calls to *iam_setup_server()*. Specifying configuration parameters with environment
     variables can be done by following these steps:
 
-    1. Specify *<APP_PREFIX>_IAM_SERVERS* with a list of names among the values found in *IamServer* class
-       (currently, *jusbr* and *keycloak* are supported), and the data set below for each server, where
-       *<IAM>* stands for the server's name as presented in *IamServer* class:
+    1. Specify *<APP_PREFIX>_AUTH_SERVERS* with a list of names among the values found in *IamServer* class
+       and the data set below for each server, where *<IAM>* stands for the server's name as presented in
+       *IamServer* class:
           - *<APP_PREFIX>_<IAM>_ADMIN_ID*           (optional, required if administrative duties are performed)
           - *<APP_PREFIX>_<IAM>_ADMIN_PWD*          (optional, required if administrative duties are performed)
           - *<APP_PREFIX>_<IAM>_CLIENT_ID*          (required)
@@ -83,34 +82,34 @@ def __get_iam_data() -> dict[IamServer, dict[IamParam, Any]]:
        but are meant to be used by function *iam_setup_endpoints()*, wherein the values in those variables
        would represent default values for its parameters, respectively:
           - *<APP_PREFIX>_<IAM>_ENDPOINT_CALLBACK*
+          - *<APP_PREFIX>_<IAM>_ENDPOINT_CALLBACK_EXCHANGE*
           - *<APP_PREFIX>_<IAM>_ENDPOINT_EXCHANGE*
           - *<APP_PREFIX>_<IAM>_ENDPOINT_LOGIN*
           - *<APP_PREFIX>_<IAM>_ENDPOINT_LOGOUT*
           - *<APP_PREFIX>_<IAM>_ENDPOINT_TOKEN*
+          - *<APP_PREFIX>_<IAM>_ENDPOINT_USERINFO*
 
     :return: the configuration data for the select *IAM* servers.
     """
     # initialize the return variable
-    result: dict[IamServer, dict[IamParam, Any]] = {}
+    result: dict[IamServer, dict[ServerParam, Any]] = {}
 
-    servers: list[IamServer] = env_get_enums(key=f"{APP_PREFIX}_IAM_SERVERS",
-                                             enum_class=IamServer) or []
-    for server in servers:
+    for server in IamServer:
         prefix = server.name
         result[server] = {
-            IamParam.ADMIN_ID: env_get_str(key=f"{APP_PREFIX}_{prefix}_ADMIN_ID"),
-            IamParam.ADMIN_SECRET: env_get_str(key=f"{APP_PREFIX}_{prefix}_ADMIN_SECRET"),
-            IamParam.CLIENT_ID: env_get_str(key=f"{APP_PREFIX}_{prefix}_CLIENT_ID"),
-            IamParam.CLIENT_REALM: env_get_str(key=f"{APP_PREFIX}_{prefix}_CLIENT_REALM"),
-            IamParam.CLIENT_SECRET: env_get_str(key=f"{APP_PREFIX}_{prefix}_CLIENT_SECRET"),
-            IamParam.LOGIN_TIMEOUT: env_get_str(key=f"{APP_PREFIX}_{prefix}_LOGIN_TIMEOUT"),
-            IamParam.PK_LIFETIME: env_get_int(key=f"{APP_PREFIX}_{prefix}_PUBLIC_KEY_LIFETIME"),
-            IamParam.RECIPIENT_ATTR: env_get_str(key=f"{APP_PREFIX}_{prefix}_RECIPIENT_ATTR"),
-            IamParam.URL_BASE: env_get_str(key=f"{APP_PREFIX}_{prefix}_URL_AUTH_BASE"),
+            ServerParam.ADMIN_ID: env_get_str(key=f"{APP_PREFIX}_{prefix}_ADMIN_ID"),
+            ServerParam.ADMIN_SECRET: env_get_str(key=f"{APP_PREFIX}_{prefix}_ADMIN_SECRET"),
+            ServerParam.CLIENT_ID: env_get_str(key=f"{APP_PREFIX}_{prefix}_CLIENT_ID"),
+            ServerParam.CLIENT_REALM: env_get_str(key=f"{APP_PREFIX}_{prefix}_CLIENT_REALM"),
+            ServerParam.CLIENT_SECRET: env_get_str(key=f"{APP_PREFIX}_{prefix}_CLIENT_SECRET"),
+            ServerParam.LOGIN_TIMEOUT: env_get_str(key=f"{APP_PREFIX}_{prefix}_LOGIN_TIMEOUT"),
+            ServerParam.PK_LIFETIME: env_get_int(key=f"{APP_PREFIX}_{prefix}_PK_LIFETIME"),
+            ServerParam.RECIPIENT_ATTR: env_get_str(key=f"{APP_PREFIX}_{prefix}_RECIPIENT_ATTR"),
+            ServerParam.URL_BASE: env_get_str(key=f"{APP_PREFIX}_{prefix}_URL_BASE"),
             # dynamically set
-            IamParam.PK_EXPIRATION: 0,
-            IamParam.PUBLIC_KEY: None,
-            IamParam.USERS: {}
+            ServerParam.PK_EXPIRATION: 0,
+            ServerParam.PUBLIC_KEY: None,
+            ServerParam.USERS: {}
         }
 
     return result
@@ -127,6 +126,7 @@ def __get_iam_data() -> dict[IamServer, dict[IamParam, Any]]:
 #       "client-realm": <str,
 #       "client-timeout": <int>,
 #       "recipient-attr": <str>,
+#       # dynamic attributes
 #       "public-key": <str>,
 #       "pk-lifetime": <int>,
 #       "pk-expiration": <int>,
@@ -148,7 +148,7 @@ def __get_iam_data() -> dict[IamServer, dict[IamParam, Any]]:
 #   },
 #   ...
 # }
-_IAM_SERVERS: Final[dict[IamServer, dict[IamParam, Any]]] = __get_iam_data()
+_IAM_SERVERS: Final[dict[IamServer, dict[ServerParam, Any]]] = __get_iam_data()
 
 
 # the lock protecting the data in '_<IAM>_SERVERS'
@@ -168,7 +168,7 @@ def _iam_server_from_endpoint(endpoint: str,
     :return: the corresponding *IAM* server, or *None* if one could not be obtained
     """
     # initialize the return variable
-    result: IamServer | None = None
+    result: type(IamServer) | None = None
 
     for iam_server in _IAM_SERVERS:
         if endpoint.startswith(iam_server):
@@ -197,10 +197,10 @@ def _iam_server_from_issuer(issuer: str,
     :return: the corresponding *IAM* server, or *None* if one could not be obtained
     """
     # initialize the return variable
-    result: IamServer | None = None
+    result: type(IamServer) | None = None
 
     for iam_server, registry in _IAM_SERVERS.items():
-        base_url: str = f"{registry[IamParam.URL_BASE]}/realms/{registry[IamParam.CLIENT_REALM]}"
+        base_url: str = f"{registry[ServerParam.URL_BASE]}/realms/{registry[ServerParam.CLIENT_REALM]}"
         if base_url == issuer:
             result = IamServer(iam_server)
             break
@@ -221,34 +221,7 @@ def _get_public_key(iam_server: IamServer,
     """
     Obtain the public key used by *iam_server* to sign the authentication tokens.
 
-    This is accomplished by requesting the token issuer for its *JWKS* (JSON Web Key Set),
-    containing the public keys used for various purposes, as indicated in the attribute *use*:
-        - *enc*: the key is intended for encryption
-        - *sig*: the key is intended for digital signature
-        - *wrap*: the key is intended for key wrapping
-
-    A typical JWKS set has the following format (for simplicity, 'n' and 'x5c' are truncated):
-        {
-            "keys": [
-                {
-                    "kid": "X2QEcSQ4Tg2M2EK6s2nhRHZH_GwD_zxZtiWVwP4S0tg",
-                    "kty": "RSA",
-                    "alg": "RSA256",
-                    "use": "sig",
-                    "n": "tQmDmyM3tMFt5FMVMbqbQYpaDPf6A5l4e_kTVDBiHrK_bRlGfkk8hYm5SNzNzCZ...",
-                    "e": "AQAB",
-                    "x5c": [
-                        "MIIClzCCAX8CBgGZY0bqrTANBgkqhkiG9w0BAQsFADAPMQ0wCwYDVQQDDARpanVk..."
-                    ],
-                    "x5t": "MHfVp4kBjEZuYOtiaaGsfLCL15Q",
-                    "x5t#S256": "QADezSLgD8emuonBz8hn8ghTnxo7AHX4NVNkr4luEhk"
-                },
-                ...
-            ]
-        }
-
-    Once the signature key is obtained, it is converted from its original *JWK* (JSON Web Key) format
-    to *PEM* (Privacy-Enhanced Mail) format. The public key is saved in *iam_server*'s registry.
+    The signaature is obtained and stored in *PEM* (Privacy-Enhanced Mail) format.
 
     :param iam_server: the reference registered *IAM* server
     :param errors: incidental error messages
@@ -263,58 +236,18 @@ def _get_public_key(iam_server: IamServer,
                                                  logger=logger)
     if registry:
         now: int = int(datetime.now(tz=TZ_LOCAL).timestamp())
-        if now > registry[IamParam.PK_EXPIRATION]:
-            # obtain the JWKS (JSON Web Key Set) from the token issuer
-            base_url: str = f"{registry[IamParam.URL_BASE]}/realms/{registry[IamParam.CLIENT_REALM]}"
-            url: str = f"{base_url}/protocol/openid-connect/certs"
-            if logger:
-                logger.debug(msg=f"Obtaining signature public key used by IAM server '{iam_server}'")
-                logger.debug(msg=f"GET {url}")
-            try:
-                response: requests.Response = requests.get(url=url)
-                if response.status_code == 200:
-                    # request succeeded
-                    if logger:
-                        logger.debug(msg=f"GET success, status {response.status_code}")
-                    # select the appropriate JWK
-                    reply: dict[str, list[dict[str, str]]] = response.json()
-                    jwk: dict[str, str] | None = None
-                    for key in reply["keys"]:
-                        if key.get("use") == "sig":
-                            jwk = key
-                            break
-                    if jwk:
-                        # convert from 'JWK' to 'PEM' and save it for further use
-                        result = crypto_jwk_convert(jwk=jwk,
-                                                    fmt="PEM")
-                        registry[IamParam.PUBLIC_KEY] = result
-                        lifetime: int = registry[IamParam.PK_LIFETIME] or 0
-                        registry[IamParam.PK_EXPIRATION] = now + lifetime if lifetime else sys.maxsize
-                        if logger:
-                            logger.debug("Public key obtained and saved")
-                    else:
-                        msg = "Signature public key missing from the token issuer's JWKS"
-                        if logger:
-                            logger.error(msg=msg)
-                        if isinstance(errors, list):
-                            errors.append(msg)
-                elif logger:
-                    msg: str = f"GET failure, status {response.status_code}, reason {response.reason}"
-                    if hasattr(response, "content") and response.content:
-                        msg += f", content {response.content}"
-                    logger.error(msg=msg)
-                    if isinstance(errors, list):
-                        errors.append(msg)
-            except Exception as e:
-                # the operation raised an exception
-                msg = exc_format(exc=e,
-                                 exc_info=sys.exc_info())
-                if logger:
-                    logger.error(msg=msg)
-                if isinstance(errors, list):
-                    errors.append(msg)
-        else:
-            result = registry[IamParam.PUBLIC_KEY]
+        if now > registry[ServerParam.PK_EXPIRATION]:
+            # obtain the public key from the token issuer
+            issuer: str = f"{registry[ServerParam.URL_BASE]}/realms/{registry[ServerParam.CLIENT_REALM]}"
+            registry[ServerParam.PUBLIC_KEY] = jwt_get_public_key(issuer=issuer,
+                                                                  fmt="PEM",
+                                                                  errors=errors,
+                                                                  logger=logger)
+            lifetime: int = registry[ServerParam.PK_LIFETIME] or 0
+            registry[ServerParam.PK_EXPIRATION] = now + lifetime if lifetime else sys.maxsize
+
+    if not errors:
+        result = registry[ServerParam.PUBLIC_KEY]
 
     return result
 
@@ -421,4 +354,4 @@ def _get_iam_users(iam_server: IamServer,
     registry: dict[str, Any] = _get_iam_registry(iam_server=iam_server,
                                                  errors=errors,
                                                  logger=logger)
-    return registry[IamParam.USERS] if registry else None
+    return registry[ServerParam.USERS] if registry else None

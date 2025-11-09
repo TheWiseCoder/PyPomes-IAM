@@ -1,18 +1,18 @@
 import json
 from flask import Request, Response, request, jsonify
+from pypomes_crypto import jwt_get_claim, jwt_validate
 from logging import Logger
 from typing import Any
 
 from .iam_common import (
-    IamServer, IamParam, _iam_lock,
+    IamServer, ServerParam, _iam_lock,
     _get_iam_registry, _get_public_key,
     _iam_server_from_endpoint, _iam_server_from_issuer
 )
 from .iam_actions import (
-    action_login, action_logout,
-    action_token, action_exchange, action_callback
+    iam_login, iam_logout, iam_callback,
+    iam_exchange, iam_get_token, iam_userinfo
 )
-from .token_pomes import token_get_claims, token_validate
 
 # the logger for IAM service operations
 # (used exclusively at the HTTP endpoints - all other functions receive the logger as parameter)
@@ -23,7 +23,10 @@ def jwt_required(func: callable) -> callable:
     """
     Create a decorator to authenticate service endpoints with JWT tokens.
 
+    The decorated function must be a registered endpoint to a *Flask* application.
+
     :param func: the function being decorated
+    :return: the return from the call to *func*, or a *Response NOT AUTHORIZED* if the authentication failed
     """
     # ruff: noqa: ANN003 - Missing type annotation for *{name}
     def wrapper(*args, **kwargs) -> Response:
@@ -44,59 +47,74 @@ def __request_validate(request: Request) -> Response:
     Because this code has a high usage frequency, only authentication failures are logged.
 
     :param request: the *request* to be verified
-    :return: *None* if the *request* is valid, otherwise a *Response* reporting the error
+    :return: *None* if the *request* is valid, otherwise a *Response NOT AUTHORIZED*
     """
     # initialize the return variable
     result: Response | None = None
 
-    # retrieve the authorization from the request header
-    auth_header: str = request.headers.get("Authorization")
-
     # validate the authorization token
     bad_token: bool = True
-    if auth_header and auth_header.startswith("Bearer "):
-        # extract and validate the JWT access token
-        token: str = auth_header.split(" ")[1]
-        claims: dict[str, Any] = token_get_claims(token=token)
-        if claims:
-            issuer: str = claims["payload"].get("iss")
-            public_key: str | None = None
-            recipient_attr: str | None = None
-            recipient_id: str = request.values.get("user-id") or request.values.get("login")
-            with _iam_lock:
-                iam_server: IamServer = _iam_server_from_issuer(issuer=issuer,
-                                                                errors=None,
-                                                                logger=__IAM_LOGGER)
-                if iam_server:
-                    # validate the token's recipient only if a user identification is provided
-                    if recipient_id:
-                        registry: dict[str, Any] = _get_iam_registry(iam_server=iam_server,
-                                                                     errors=None,
-                                                                     logger=__IAM_LOGGER)
-                        if registry:
-                            recipient_attr = registry[IamParam.RECIPIENT_ATTR]
-                    public_key = _get_public_key(iam_server=iam_server,
-                                                 errors=None,
-                                                 logger=__IAM_LOGGER)
-            # validate the token (log errors, only)
-            errors: list[str] = []
-            if token_validate(token=token,
-                              issuer=issuer,
-                              recipient_id=recipient_id,
-                              recipient_attr=recipient_attr,
-                              public_key=public_key,
-                              errors=errors):
+    token: str = __get_bearer_token(request=request)
+    if token:
+        # extract token issuer
+        issuer: str = jwt_get_claim(token=token,
+                                    key="iss",
+                                    logger=__IAM_LOGGER)
+        public_key: str | None = None
+        recipient_attr: str | None = None
+        recipient_id: str = (request.values.get("user-id") or request.values.get("login") or
+                             (request.get_json(silent=True) or {}).get("user-id") or
+                             (request.get_json(silent=True) or {}).get("login"))
+        with _iam_lock:
+            iam_server: IamServer = _iam_server_from_issuer(issuer=issuer,
+                                                            errors=None,
+                                                            logger=__IAM_LOGGER)
+            if iam_server:
+                # validate the token's recipient only if a user identification is provided
+                if recipient_id:
+                    registry: dict[str, Any] = _get_iam_registry(iam_server=iam_server,
+                                                                 errors=None,
+                                                                 logger=__IAM_LOGGER)
+                    if registry:
+                        recipient_attr = registry[ServerParam.RECIPIENT_ATTR]
+                public_key = _get_public_key(iam_server=iam_server,
+                                             errors=None,
+                                             logger=__IAM_LOGGER)
+            # validate the token, with or without the public key
+            if jwt_validate(token=token,
+                            issuer=issuer,
+                            recipient_id=recipient_id,
+                            recipient_attr=recipient_attr,
+                            public_key=public_key,
+                            logger=__IAM_LOGGER):
                 # token is valid
                 bad_token = False
-            elif __IAM_LOGGER:
-                __IAM_LOGGER.error("; ".join(errors))
-        if bad_token and __IAM_LOGGER:
-            __IAM_LOGGER.error(f"Authorization refused for token {token}")
 
     # deny the authorization
     if bad_token:
+        __IAM_LOGGER.error(f"Authorization refused for token {token}")
         result = Response(response="Authorization failed",
                           status=401)
+    return result
+
+
+def __get_bearer_token(request: Request) -> str:
+    """
+    Retrieve the bearer token sent in the header of *request*.
+
+    This implementation assumes that HTTP requests are handled with the *Flask* framework.
+
+    :param request: the *request* to retrieve the token from
+    :return: the bearer token, or *None* if not found
+    """
+    # initialize the return variable
+    result: str | None = None
+
+    # retrieve the authorization from the request header
+    auth_header: str = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        result: str = auth_header.split(" ")[1]
+
     return result
 
 
@@ -110,11 +128,62 @@ def iam_setup_logger(logger: Logger) -> None:
     __IAM_LOGGER = logger
 
 
-# @flask_app.route(rule=<login_endpoint>,  # IAM_ENDPOINT_LOGIN
+# @flask_app.route(rule=<setup_server_endpoint>,
+#                  methods=["POST"])
+def service_setup_server() -> Response:
+    """
+    Entry point to setup a *IAM* server.
+
+    These are the expected parameters in the request's body, in a JSON or as form data:
+        - *iam_server*: identifies the supported *IAM* server
+        - *admin_id*: identifies the realm administrator
+        - *admin_secret*: password for the realm administrator
+        - *client_id*: the client's identification with the *IAM* server
+        - *client_realm*: the client's realm
+        - *client_secret*: the client's password with the *IAM* server
+        - *login_timeout*: timeout for login authentication (in seconds,defaults to no timeout)
+        - *k_lifetime*: how long to use *IAM* server's public key, before refreshing it (in seconds)
+        - *recipient_attr*: attribute in the token's payload holding the token's subject
+        - *rl_base*: base URL to request services
+
+    For the parameters not effectively passed, an attempt is made to obtain a value from the corresponding
+    environment variables. Most parameters are required to have values, which must be assigned either
+    throught the function invocation, or from the corresponding environment variables.
+
+    The parameters *admin_id* and *admin_secret* are required only if performing administrative tasks is intended.
+    The optional parameter *ogin_timeout* refers to the maximum time in seconds allowed for the user
+    to login at the *IAM* server's login page, and defaults to no time limit.
+
+    The parameter *client_secret* is required in most requests to the *IAM* server. In the case
+    it is not provided, but *admin_id* and *admin_secret* are, it is obtained from the *IAM* server itself
+    the first time it is needed.
+
+    :return: *Response OK*
+    """
+    # retrieve the request arguments
+    args: dict[str, Any] = dict(request.get_json(silent=True) or request.form or {})
+
+    # log the request
+    if __IAM_LOGGER:
+        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
+                                                                                      ensure_ascii=False)}")
+    # setup the server
+    from .iam_pomes import iam_setup_server
+    iam_setup_server(**args)
+    result = Response(status=200)
+
+    # log the response
+    if __IAM_LOGGER:
+        __IAM_LOGGER.debug(msg=f"Response {result}")
+
+    return result
+
+
+# @flask_app.route(rule=<login_endpoint>,
 #                  methods=["GET"])
 def service_login() -> Response:
     """
-    Entry point for the IAM server's login service.
+    Entry point for the *IAM* server's login service.
 
     When registering this endpoint, the name used in *Flask*'s *endpoint* parameter must be prefixed with
     the name of the *IAM* server in charge of handling this service. This prefixing is done automatically
@@ -137,10 +206,13 @@ def service_login() -> Response:
     # declare the return variable
     result: Response | None = None
 
+    # retrieve the request arguments
+    args: dict[str, Any] = dict(request.args or {})
+
     # log the request
     if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=_log_init(request=request))
-
+        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
+                                                                                      ensure_ascii=False)}")
     errors: list[str] = []
     with _iam_lock:
         # retrieve the IAM server
@@ -149,10 +221,10 @@ def service_login() -> Response:
                                                           logger=__IAM_LOGGER)
         if iam_server:
             # obtain the login URL
-            login_url: str = action_login(iam_server=iam_server,
-                                          args=request.args,
-                                          errors=errors,
-                                          logger=__IAM_LOGGER)
+            login_url: str = iam_login(iam_server=iam_server,
+                                       args=args,
+                                       errors=errors,
+                                       logger=__IAM_LOGGER)
             if login_url:
                 result = jsonify({"login-url": login_url})
     if errors:
@@ -166,17 +238,18 @@ def service_login() -> Response:
     return result
 
 
-# @flask_app.route(rule=<logout_endpoint>,  # IAM_ENDPOINT_LOGOUT
-#                  methods=["GET"])
+# @flask_app.route(rule=<logout_endpoint>,
+#                  methods=["POST"])
+@jwt_required
 def service_logout() -> Response:
     """
-    Entry point for the IAM server's logout service.
+    Entry point for the *IAM* server's logout service.
 
     When registering this endpoint, the name used in *Flask*'s *endpoint* parameter must be prefixed with
     the name of the *IAM* server in charge of handling this service. This prefixing is done automatically
     if the endpoint is established with a call to *iam_setup_endpoints()*.
 
-    The user is identified by the attribute *user-id* or "login", provided as a request parameter.
+    The user is identified by the attribute *user-id* or "login", provided in the body's *JSON*.
     If successful, remove all data relating to the user from the *IAM* server's registry.
     Otherwise, this operation fails silently, unless an error has ocurred.
 
@@ -185,10 +258,13 @@ def service_logout() -> Response:
     # declare the return variable
     result: Response | None
 
+    # retrieve the request arguments
+    args: dict[str, Any] = dict(request.get_json(silent=True) or request.form or {})
+
     # log the request
     if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=_log_init(request=request))
-
+        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
+                                                                                      ensure_ascii=False)}")
     errors: list[str] = []
     with _iam_lock:
         # retrieve the IAM server
@@ -197,10 +273,10 @@ def service_logout() -> Response:
                                                           logger=__IAM_LOGGER)
         if iam_server:
             # logout the user
-            action_logout(iam_server=iam_server,
-                          args=request.args,
-                          errors=errors,
-                          logger=__IAM_LOGGER)
+            iam_logout(iam_server=iam_server,
+                       args=args,
+                       errors=errors,
+                       logger=__IAM_LOGGER)
     if errors:
         result = Response(response="; ".join(errors),
                           status=400)
@@ -214,11 +290,11 @@ def service_logout() -> Response:
     return result
 
 
-# @flask_app.route(rule=<callback_endpoint>,  # IAM_ENDPOINT_CALLBACK
-#                  methods=["GET", "POST"])
+# @flask_app.route(rule=<callback_endpoint>,
+#                  methods=["GET"])
 def service_callback() -> Response:
     """
-    Entry point for the callback from the IAM server on authentication operation.
+    Entry point for the callback from the *IAM* server on authentication operation.
 
     When registering this endpoint, the name used in *Flask*'s *endpoint* parameter must be prefixed with
     the name of the *IAM* server in charge of handling this service. This prefixing is done automatically
@@ -240,10 +316,13 @@ def service_callback() -> Response:
 
     :return: *Response* containing the reference user identification and the token, or *BAD REQUEST*
     """
+    # retrieve the request arguments
+    args: dict[str, Any] = dict(request.args or {})
+
     # log the request
     if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=_log_init(request=request))
-
+        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
+                                                                                      ensure_ascii=False)}")
     errors: list[str] = []
     token_data: tuple[str, str] | None = None
     with _iam_lock:
@@ -253,10 +332,10 @@ def service_callback() -> Response:
                                                           logger=__IAM_LOGGER)
         if iam_server:
             # process the callback operation
-            token_data = action_callback(iam_server=iam_server,
-                                         args=request.args,
-                                         errors=errors,
-                                         logger=__IAM_LOGGER)
+            token_data = iam_callback(iam_server=iam_server,
+                                      args=args,
+                                      errors=errors,
+                                      logger=__IAM_LOGGER)
     result: Response
     if errors:
         result = jsonify({"errors": "; ".join(errors)})
@@ -271,7 +350,7 @@ def service_callback() -> Response:
     return result
 
 
-# @flask_app.route(rule=<callback_endpoint>,  # KEYCLOAK_ENDPOINT_EXCHANGE
+# @flask_app.route(rule=<callback_endpoint>,
 #                  methods=["POST"])
 def service_exchange() -> Response:
     """
@@ -284,7 +363,7 @@ def service_exchange() -> Response:
     If the exchange is successful, the token data is stored in the *IAM* server's registry, and returned.
     Otherwise, *errors* will contain the appropriate error message.
 
-    The expected request parameters are:
+    The expected request parameters, to be found in the body *JSON*, are:
         - user-id: identification for the reference user (alias: 'login')
         - access-token: the token to be exchanged
 
@@ -296,10 +375,13 @@ def service_exchange() -> Response:
 
     :return: *Response* containing the reference user identification and the token, or *BAD REQUEST*
     """
+    # retrieve the request arguments
+    args: dict[str, Any] = dict(request.get_json(silent=True) or request.form or {})
+
     # log the request
     if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=_log_init(request=request))
-
+        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
+                                                                                      ensure_ascii=False)}")
     errors: list[str] = []
     with _iam_lock:
         # retrieve the IAM server
@@ -310,10 +392,10 @@ def service_exchange() -> Response:
         token_info: tuple[str, str] | None = None
         if iam_server:
             errors: list[str] = []
-            token_info = action_exchange(iam_server=iam_server,
-                                         args=request.args,
-                                         errors=errors,
-                                         logger=__IAM_LOGGER)
+            token_info = iam_exchange(iam_server=iam_server,
+                                      args=args,
+                                      errors=errors,
+                                      logger=__IAM_LOGGER)
     result: Response
     if errors:
         result = Response(response="; ".join(errors),
@@ -328,9 +410,9 @@ def service_exchange() -> Response:
     return result
 
 
-# @flask_app.route(rule=/iam/jusbr:callback,
+# @flask_app.route(rule=/iam/jusbr:callback-exchange,
 #                  methods=["GET"])
-def service_callback_and_exchange() -> Response:
+def service_callback_exchange() -> Response:
     """
     Entry point for the callback from the IAM server on authentication operation, with subsequent token exchange.
 
@@ -361,10 +443,13 @@ def service_callback_and_exchange() -> Response:
     # declare the return variable
     result: Response | None = None
 
+    # retrieve the request arguments
+    args: dict[str, Any] = dict(request.args or {})
+
     # log the request
     if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=_log_init(request=request))
-
+        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
+                                                                                      ensure_ascii=False)}")
     errors: list[str] = []
     with _iam_lock:
         # retrieve the IAM server
@@ -372,10 +457,10 @@ def service_callback_and_exchange() -> Response:
                                                           errors=errors,
                                                           logger=__IAM_LOGGER)
         # obtain the login URL
-        token_info: tuple[str,  str] = action_callback(iam_server=iam_server,
-                                                       args=request.args,
-                                                       errors=errors,
-                                                       logger=__IAM_LOGGER)
+        token_info: tuple[str,  str] = iam_callback(iam_server=iam_server,
+                                                    args=args,
+                                                    errors=errors,
+                                                    logger=__IAM_LOGGER)
         if token_info:
             args: dict[str, str] = {
                 "user-id": token_info[0],
@@ -386,9 +471,9 @@ def service_callback_and_exchange() -> Response:
             exchange_server: IamServer = _iam_server_from_endpoint(endpoint=request.endpoint[pos+4],
                                                                    errors=errors,
                                                                    logger=__IAM_LOGGER)
-            token_info = action_exchange(iam_server=exchange_server,
-                                         args=args,
-                                         logger=__IAM_LOGGER)
+            token_info = iam_exchange(iam_server=exchange_server,
+                                      args=args,
+                                      logger=__IAM_LOGGER)
             if token_info:
                 result = jsonify({"user-id": token_info[0],
                                   "access-token": token_info[1]})
@@ -403,9 +488,9 @@ def service_callback_and_exchange() -> Response:
     return result
 
 
-# @flask_app.route(rule=<token_endpoint>,  # IAM_ENDPOINT_TOKEN
+# @flask_app.route(rule=<token_endpoint>,
 #                  methods=["GET"])
-def service_token() -> Response:
+def service_get_token() -> Response:
     """
     Entry point for retrieving a token from the *IAM* server.
 
@@ -423,42 +508,33 @@ def service_token() -> Response:
 
     :return: *Response* containing the user reference identification and the token, or *BAD REQUEST*
     """
+    # retrieve the request arguments
+    args: dict[str, Any] = dict(request.args) or {}
+
     # log the request
     if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=_log_init(request=request))
-
-    # obtain the user's identification
-    args: dict[str, Any] = request.args
-    user_id: str = args.get("user-id") or args.get("login")
-
+        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
+                                                                                      ensure_ascii=False)}")
     errors: list[str] = []
-    token: str | None = None
-    if user_id:
-        with _iam_lock:
-            # retrieve the IAM server
-            iam_server: IamServer = _iam_server_from_endpoint(endpoint=request.endpoint,
-                                                              errors=errors,
-                                                              logger=__IAM_LOGGER)
-            if iam_server:
-                # retrieve the token
-                errors: list[str] = []
-                token: str = action_token(iam_server=iam_server,
-                                          args=args,
-                                          errors=errors,
-                                          logger=__IAM_LOGGER)
-    else:
-        msg: str = "User identification not provided"
-        errors.append(msg)
-        if __IAM_LOGGER:
-            __IAM_LOGGER.error(msg=msg)
-
+    token_info: dict[str, str] | None = None
+    with _iam_lock:
+        # retrieve the IAM server
+        iam_server: IamServer = _iam_server_from_endpoint(endpoint=request.endpoint,
+                                                          errors=errors,
+                                                          logger=__IAM_LOGGER)
+        if iam_server:
+            # retrieve the token
+            errors: list[str] = []
+            token_info = iam_get_token(iam_server=iam_server,
+                                       args=args,
+                                       errors=errors,
+                                       logger=__IAM_LOGGER)
     result: Response
     if errors:
         result = Response(response="; ".join(errors),
                           status=400)
     else:
-        result = jsonify({"user-id": user_id,
-                          "access-token": token})
+        result = jsonify(token_info)
     if __IAM_LOGGER:
         # log the response (the returned data is not logged, as it contains the token)
         __IAM_LOGGER.debug(msg=f"Response {result}")
@@ -466,14 +542,55 @@ def service_token() -> Response:
     return result
 
 
-def _log_init(request: Request) -> str:
+# @flask_app.route(rule=<token_endpoint>,
+#                  methods=["GET"])
+@jwt_required
+def service_userinfo() -> Response:
     """
-    Build the messages for logging the request entry.
+    Entry point for retrieving user data from the *IAM* server.
 
-    :param request: the Request object
-    :return: the log message
+    When registering this endpoint, the name used in *Flask*'s *endpoint* parameter must be prefixed with
+    the name of the *IAM* server in charge of handling this service. This prefixing is done automatically
+    if the endpoint is established with a call to *iam_setup_endpoints()*.
+
+    The user is identified by the attribute *user-id* or "login", provided as a request parameter.
+
+    On success, the returned *Response* will contain a JSON with information kept by *iam_server* about *user_id*.
+
+    :return: *Response* containing user data, or *BAD REQUEST*
     """
+    # retrieve the request arguments
+    args: dict[str, Any] = dict(request.args) or {}
 
-    params: str = json.dumps(obj=request.args,
-                             ensure_ascii=False)
-    return f"Request {request.method}:{request.path}, params {params}"
+    # log the request
+    if __IAM_LOGGER:
+        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
+                                                                                      ensure_ascii=False)}")
+    # retrieve the bearer token
+    args["access-token"] = __get_bearer_token(request=request)
+
+    errors: list[str] = []
+    user_info: dict[str, str] | None = None
+    with _iam_lock:
+        # retrieve the IAM server
+        iam_server: IamServer = _iam_server_from_endpoint(endpoint=request.endpoint,
+                                                          errors=errors,
+                                                          logger=__IAM_LOGGER)
+        if iam_server:
+            # retrieve the token
+            errors: list[str] = []
+            user_info = iam_userinfo(iam_server=iam_server,
+                                     args=args,
+                                     errors=errors,
+                                     logger=__IAM_LOGGER)
+    result: Response
+    if errors:
+        result = Response(response="; ".join(errors),
+                          status=400)
+    else:
+        result = jsonify(user_info)
+    if __IAM_LOGGER:
+        # log the response
+        __IAM_LOGGER.debug(msg=f"Response {result}; {json.dumps(obj=user_info,
+                                                                ensure_ascii=False)}")
+    return result

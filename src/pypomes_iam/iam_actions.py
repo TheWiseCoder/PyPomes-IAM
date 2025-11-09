@@ -6,20 +6,20 @@ import sys
 from datetime import datetime
 from logging import Logger
 from pypomes_core import TZ_LOCAL, exc_format
+from pypomes_crypto import jwt_get_claim, jwt_validate
 from typing import Any
 
 from .iam_common import (
-    IamServer, IamParam, UserParam, _iam_lock,
+    IamServer, ServerParam, UserParam, _iam_lock,
     _get_iam_users, _get_iam_registry, _get_public_key,
     _get_login_timeout, _get_user_data, _iam_server_from_issuer
 )
-from .token_pomes import token_get_values, token_validate
 
 
-def action_login(iam_server: IamServer,
-                 args: dict[str, Any],
-                 errors: list[str] = None,
-                 logger: Logger = None) -> str:
+def iam_login(iam_server: IamServer,
+              args: dict[str, Any],
+              errors: list[str] = None,
+              logger: Logger = None) -> str:
     """
     Build the URL for redirecting the request to *iam_server*'s authentication page.
 
@@ -31,6 +31,11 @@ def action_login(iam_server: IamServer,
     If provided, the user identification will be validated against the authorization data
     returned by *iam_server* upon login. On success, the appropriate URL for invoking
     the IAM server's authentication page is returned.
+
+    if 'target_idp' is provided as an attribute in *args*, the OAuth2 state variable included in the
+    returned URL will be postfixed with the string *#idp=<target-idp>*. At the callback endpoint,
+    this instructs *iam_server* to act as a broker, forwading the authentication process to the
+    *IAM* server *target-idp*.
 
     :param iam_server: the reference registered *IAM* server
     :param args: the arguments passed when requesting the service
@@ -51,7 +56,7 @@ def action_login(iam_server: IamServer,
     # ('oauth_state' is a randomly-generated string, thus 'user_data' is always a new entry)
     oauth_state: str = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
     if target_idp:
-        oauth_state += f"idp={target_idp}"
+        oauth_state += f"_{target_idp}"
 
     with _iam_lock:
         # retrieve the user data from the IAM server's registry
@@ -75,10 +80,10 @@ def action_login(iam_server: IamServer,
                                                              errors=errors,
                                                              logger=logger)
                 if registry:
-                    base_url: str = f"{registry[IamParam.URL_BASE]}/realms/{registry[IamParam.CLIENT_REALM]}"
+                    base_url: str = f"{registry[ServerParam.URL_BASE]}/realms/{registry[ServerParam.CLIENT_REALM]}"
                     result = (f"{base_url}/protocol/openid-connect/auth"
                               f"?response_type=code&scope=openid"
-                              f"&client_id={registry[IamParam.CLIENT_ID]}"
+                              f"&client_id={registry[ServerParam.CLIENT_ID]}"
                               f"&redirect_uri={redirect_uri}"
                               f"&state={oauth_state}")
                     if target_idp:
@@ -88,16 +93,16 @@ def action_login(iam_server: IamServer,
     return result
 
 
-def action_logout(iam_server: IamServer,
-                  args: dict[str, Any],
-                  errors: list[str] = None,
-                  logger: Logger = None) -> None:
+def iam_logout(iam_server: IamServer,
+               args: dict[str, Any],
+               errors: list[str] = None,
+               logger: Logger = None) -> None:
     """
     Logout the user, by removing all data associating it from *iam_server*'s registry.
 
-    The user is identified by the attribute *user-id* or "login", provided in *args*.
-    If successful, remove all data relating to the user from the *IAM* server's registry.
-    Otherwise, this operation fails silently, unless an error has ocurred.
+    The user is identified by the attribute *user-id* or *login*, provided in *args*.
+    A logout request is sent to *iam_server* and, if successful, remove all data relating to the user
+    from the *IAM* server's registry.
 
     :param iam_server: the reference registered *IAM* server
     :param args: the arguments passed when requesting the service
@@ -109,33 +114,90 @@ def action_logout(iam_server: IamServer,
 
     if user_id:
         with _iam_lock:
-            # retrieve the data for all users in the IAM server's registry
-            users: dict[str, dict[str, Any]] = _get_iam_users(iam_server=iam_server,
-                                                              errors=errors,
-                                                              logger=logger) or {}
-            if user_id in users:
-                users.pop(user_id)
-                if logger:
-                    logger.debug(msg=f"User '{user_id}' removed from {iam_server}'s registry")
+            # retrieve the IAM server's registry and the data for all users therein
+            registry: dict[str, Any] = _get_iam_registry(iam_server,
+                                                         errors=errors,
+                                                         logger=logger)
+            users: dict[str, dict[str, Any]] = registry[ServerParam.USERS] if registry else {}
+            user_data: dict[str, Any] = users.get(user_id)
+            if user_data:
+                # request the IAM server to logout 'client_id'
+                client_secret: str = __get_client_secret(iam_server=iam_server,
+                                                         errors=errors,
+                                                         logger=logger)
+                if client_secret:
+                    url: str = (f"{registry[ServerParam.URL_BASE]}/realms/{registry[ServerParam.CLIENT_REALM]}"
+                                "/protocol/openid-connect/logout")
+                    header_data: dict[str, str] = {
+                        "Content-Type": "application/x-www-form-urlencoded"
+                    }
+                    body_data: dict[str, Any] = {
+                        "client_id": registry[ServerParam.CLIENT_ID],
+                        "client_secret": client_secret,
+                        "refresh_token": user_data[UserParam.REFRESH_TOKEN]
+                    }
+                    #  log the POST
+                    if logger:
+                        logger.debug(msg=f"POST {url}")
+                    try:
+                        response: requests.Response = requests.post(url=url,
+                                                                    headers=header_data,
+                                                                    data=body_data)
+                        if response.status_code in [200, 204]:
+                            # request succeeded
+                            if logger:
+                                logger.debug(msg=f"POST success")
+                        else:
+                            # request failed, report the problem
+                            msg: str = f"POST failure, status {response.status_code}, reason {response.reason}"
+                            if logger:
+                                logger.error(msg=msg)
+                            if isinstance(errors, list):
+                                errors.append(msg)
+                    except Exception as e:
+                        # the operation raised an exception
+                        msg: str = exc_format(exc=e,
+                                              exc_info=sys.exc_info())
+                        if logger:
+                            logger.error(msg=msg)
+                        if isinstance(errors, list):
+                            errors.append(msg)
+
+                    if not errors and user_id in users:
+                        users.pop(user_id)
+                        if logger:
+                            logger.debug(msg=f"User '{user_id}' removed from {iam_server}'s registry")
+    else:
+        msg: str = "User identification not provided"
+        if logger:
+            logger.error(msg=msg)
+        if isinstance(errors, list):
+            errors.append(msg)
 
 
-def action_token(iam_server: IamServer,
-                 args: dict[str, Any],
-                 errors: list[str] = None,
-                 logger: Logger = None) -> str:
+def iam_get_token(iam_server: IamServer,
+                  args: dict[str, Any],
+                  errors: list[str] = None,
+                  logger: Logger = None) -> dict[str, str]:
     """
     Retrieve the authentication token for the user, from *iam_server*.
 
     The user is identified by the attribute *user-id* or *login*, provided in *args*.
 
+    On success, the returned *dict* will contain the following JSON:
+        {
+            "access-token": <token>,
+            "user-id": <user-identification
+        }
+
     :param iam_server: the reference registered *IAM* server
     :param args: the arguments passed when requesting the service
     :param errors: incidental error messages
     :param logger: optional logger
-    :return: the token for user indicated, or *None* if error
+    :return: the user identification and token issued, or *None* if error
     """
     # initialize the return variable
-    result: str | None = None
+    result: dict[str, str] | None = None
 
     # obtain the user's identification
     user_id: str = args.get("user-id") or args.get("login")
@@ -154,7 +216,10 @@ def action_token(iam_server: IamServer,
                 access_expiration: int = user_data.get(UserParam.ACCESS_EXPIRATION)
                 now: int = int(datetime.now(tz=TZ_LOCAL).timestamp())
                 if now < access_expiration:
-                    result = token
+                    result = {
+                        "access-token": token,
+                        "user-id": user_id
+                    }
                 else:
                     # access token has expired
                     refresh_token: str = user_data[UserParam.REFRESH_TOKEN]
@@ -162,7 +227,7 @@ def action_token(iam_server: IamServer,
                         refresh_expiration: int = user_data[UserParam.REFRESH_EXPIRATION]
                         if now < refresh_expiration:
                             header_data: dict[str, str] = {
-                                "Content-Type": "application/json"
+                                "Content-Type": "application/x-www-form-urlencoded"
                             }
                             body_data: dict[str, str] = {
                                 "grant_type": "refresh_token",
@@ -182,7 +247,10 @@ def action_token(iam_server: IamServer,
                                                                                    now=now,
                                                                                    errors=errors,
                                                                                    logger=logger)
-                                result = token_info[1]
+                                result = {
+                                    "access-token": token_info[1],
+                                    "user-id": user_id
+                                }
                             else:
                                 # refresh token is no longer valid
                                 user_data[UserParam.REFRESH_TOKEN] = None
@@ -210,16 +278,20 @@ def action_token(iam_server: IamServer,
     return result
 
 
-def action_callback(iam_server: IamServer,
-                    args: dict[str, Any],
-                    errors: list[str] = None,
-                    logger: Logger = None) -> tuple[str, str] | None:
+def iam_callback(iam_server: IamServer,
+                 args: dict[str, Any],
+                 errors: list[str] = None,
+                 logger: Logger = None) -> tuple[str, str] | None:
     """
     Entry point for the callback from *iam_server* via the front-end application, on authentication operations.
 
     The relevant expected arguments in *args* are:
         - *state*: used to enhance security during the authorization process, typically to provide *CSRF* protection
         - *code*: the temporary authorization code provided by *iam_server*, to be exchanged for the token
+
+    if *state* is postfixed with the string *#idp=<target-idp>*, this instructs *iam_server* to act as a broker,
+    forwarding the authentication process to the *IAM* server *target-idp*. This mechanism fully dispenses with
+    the flows 'callback-exchange', and 'callback' followed by 'exchange'.
 
     :param iam_server: the reference registered *IAM* server
     :param args: the arguments passed when requesting the service
@@ -250,9 +322,9 @@ def action_callback(iam_server: IamServer,
             if int(datetime.now(tz=TZ_LOCAL).timestamp()) > expiration:
                 errors.append("Operation timeout")
             else:
-                pos: int = oauth_state.rfind("idp=")
-                target_idp: str = oauth_state[pos+4:] if pos > 0 else None
-                target_iam = IamServer(target_idp) if target_idp in IamServer else None
+                pos: int = oauth_state.rfind("_")
+                target_idp: str = oauth_state[pos+1:] if pos > 0 else None
+                target_iam: IamServer = IamServer(target_idp) if target_idp in IamServer else None
                 target_data: dict[str, Any] = user_data.copy() if target_iam else None
                 users.pop(oauth_state)
                 code: str = args.get("code")
@@ -285,8 +357,8 @@ def action_callback(iam_server: IamServer,
                         registry: dict[str, Any] = _get_iam_registry(iam_server,
                                                                      errors=errors,
                                                                      logger=logger)
-                        url: str = f"{registry[IamParam.URL_BASE]}/realms/{registry[IamParam.CLIENT_REALM]}"
-                        url += f"/broker/{target_idp}/token"
+                        url: str = (f"{registry[ServerParam.URL_BASE]}/realms/"
+                                    f"{registry[ServerParam.CLIENT_REALM]}/broker/{target_idp}/token")
                         header_data: dict[str, str] = {
                             "Authorization": f"Bearer {result[1]}",
                             "Content-Type": "application/json"
@@ -315,10 +387,10 @@ def action_callback(iam_server: IamServer,
     return result
 
 
-def action_exchange(iam_server: IamServer,
-                    args: dict[str, Any],
-                    errors: list[str] = None,
-                    logger: Logger = None) -> tuple[str, str]:
+def iam_exchange(iam_server: IamServer,
+                 args: dict[str, Any],
+                 errors: list[str] = None,
+                 logger: Logger = None) -> tuple[str, str]:
     """
     Request *iam_server* to issue a token in exchange for the token obtained from another *IAM* server.
 
@@ -344,66 +416,124 @@ def action_exchange(iam_server: IamServer,
     # initialize the return variable
     result: tuple[str, str] | None = None
 
+    # make sure to have an errors list
+    if not isinstance(errors, list):
+        errors = []
+
     # obtain the user's identification
     user_id: str = args.get("user-id") or args.get("login")
 
     # obtain the token to be exchanged
-    token: str = args.get("access-token") if user_id else None
-    token_issuer: tuple[str] = token_get_values(token=token,
-                                                keys=("iss",),
-                                                errors=errors,
-                                                logger=logger)
-    if not errors:
-        # HAZARD: only 'IAM_KEYCLOAK' is currently supported
-        with _iam_lock:
-            # retrieve the IAM server's registry
-            registry: dict[str, Any] = _get_iam_registry(iam_server=iam_server,
-                                                         errors=errors,
-                                                         logger=logger)
-            if registry:
-                # make sure 'client_id' is linked to the token's 'token_sub' at the IAM server
-                __assert_link(iam_server=iam_server,
-                              user_id=user_id,
-                              token=token,
-                              token_issuer=token_issuer[0],
-                              errors=errors,
-                              logger=logger)
-                if not errors:
-                    # exchange the token
-                    if logger:
-                        logger.debug(msg=f"Requesting the token exchange to IAM server '{iam_server}'")
-                    header_data: dict[str, Any] = {
-                        "Content-Type": "application/x-www-form-urlencoded"
-                    }
-                    body_data: dict[str, str] = {
-                        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-                        "subject_token": token,
-                        "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
-                        "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
-                        "audience": registry[IamParam.CLIENT_ID],
-                        "subject_issuer": token_issuer
-                    }
-                    now: int = int(datetime.now(tz=TZ_LOCAL).timestamp())
-                    token_data: dict[str, Any] = __post_for_token(iam_server=iam_server,
-                                                                  header_data=header_data,
-                                                                  body_data=body_data,
-                                                                  errors=errors,
-                                                                  logger=logger)
-                    # validate and store the token data
-                    if token_data:
-                        user_data: dict[str, Any] = {}
-                        result = __validate_and_store(iam_server=iam_server,
-                                                      user_data=user_data,
-                                                      token_data=token_data,
-                                                      now=now,
-                                                      errors=errors,
-                                                      logger=logger)
+    token: str = args.get("access-token")
+
+    if user_id and token:
+        token_issuer: str = jwt_get_claim(token=token,
+                                          key="iss",
+                                          errors=errors,
+                                          logger=logger)
+        if not errors:
+            with _iam_lock:
+                # retrieve the IAM server's registry
+                registry: dict[str, Any] = _get_iam_registry(iam_server=iam_server,
+                                                             errors=errors,
+                                                             logger=logger)
+                if registry:
+                    # make sure 'client_id' is linked to the token's 'token_sub' at the IAM server
+                    __assert_link(iam_server=iam_server,
+                                  user_id=user_id,
+                                  token=token,
+                                  token_issuer=token_issuer,
+                                  errors=errors,
+                                  logger=logger)
+                    if not errors:
+                        # exchange the token
+                        if logger:
+                            logger.debug(msg=f"Requesting the token exchange to IAM server '{iam_server}'")
+                        header_data: dict[str, Any] = {
+                            "Content-Type": "application/x-www-form-urlencoded"
+                        }
+                        body_data: dict[str, str] = {
+                            "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                            "subject_token": token,
+                            "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                            "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                            "audience": registry[ServerParam.CLIENT_ID],
+                            "subject_issuer": token_issuer
+                        }
+                        now: int = int(datetime.now(tz=TZ_LOCAL).timestamp())
+                        token_data: dict[str, Any] = __post_for_token(iam_server=iam_server,
+                                                                      header_data=header_data,
+                                                                      body_data=body_data,
+                                                                      errors=errors,
+                                                                      logger=logger)
+                        # validate and store the token data
+                        if not errors:
+                            user_data: dict[str, Any] = {}
+                            result = __validate_and_store(iam_server=iam_server,
+                                                          user_data=user_data,
+                                                          token_data=token_data,
+                                                          now=now,
+                                                          errors=errors,
+                                                          logger=logger)
     else:
         msg: str = "User identification or token not provided"
         if logger:
-            logger.error(msg=msg)
+            logger.debug(msg=msg)
+        errors.append(msg)
+
+    return result
+
+
+def iam_userinfo(iam_server: IamServer,
+                 args: dict[str, Any],
+                 errors: list[str] = None,
+                 logger: Logger = None) -> dict[str, Any] | None:
+    """
+    Obtain user data from *iam_server*.
+
+    The user is identified by the attribute *user-id* or *login*, provided in *args*.
+
+    :param iam_server: the reference registered *IAM* server
+    :param args: the arguments passed when requesting the service
+    :param errors: incidental error messages
+    :param logger: optional logger
+    :return: the user information requested, or *None* if error
+    """
+    # initialize the return variable
+    result: dict[str, Any] | None = None
+
+    # obtain the user's identification
+    user_id: str = args.get("user-id") or args.get("login")
+
+    err_msg: str | None = None
+    if user_id:
+        with _iam_lock:
+            # retrieve the IAM server's registry and the user data therein
+            registry: dict[str, Any] = _get_iam_registry(iam_server,
+                                                         errors=errors,
+                                                         logger=logger)
+            user_data: dict[str, Any] = registry[ServerParam.USERS].get(user_id)
+            if user_data:
+                url: str = (f"{registry[ServerParam.URL_BASE]}/realms/{registry[ServerParam.CLIENT_REALM]}"
+                            "/protocol/openid-connect/userinfo")
+                header_data: dict[str, str] = {
+                    "Authorization": f"Bearer {args.get('access-token')}"
+                }
+                result = __get_for_data(url=url,
+                                        header_data=header_data,
+                                        params=None,
+                                        errors=errors,
+                                        logger=logger)
+            else:
+                err_msg = f"Unknown user '{user_id}'"
+    else:
+        err_msg: str = "User identification not provided"
+
+    if err_msg:
+        if logger:
+            logger.error(msg=err_msg)
         if isinstance(errors, list):
-            errors.append(msg)
+            errors.append(err_msg)
 
     return result
 
@@ -425,6 +555,10 @@ def __assert_link(iam_server: IamServer,
     :param errors: incidental errors
     :param logger: optional logger
     """
+    # make sure to have an errors list
+    if not isinstance(errors, list):
+        errors = []
+
     if logger:
         logger.debug(msg="Verifying associations for user "
                          f"'{user_id}' in IAM server '{iam_server}'")
@@ -440,7 +574,7 @@ def __assert_link(iam_server: IamServer,
         if logger:
             logger.debug(msg="Obtaining internal identification "
                              f"for user '{user_id}' in IAM server '{iam_server}'")
-        url: str = f"{registry[IamParam.URL_BASE]}/admin/realms/{registry[IamParam.CLIENT_REALM]}/users"
+        url: str = f"{registry[ServerParam.URL_BASE]}/admin/realms/{registry[ServerParam.CLIENT_REALM]}/users"
         header_data: dict[str, str] = {
             "Authorization": f"Bearer {admin_token}",
             "Content-Type": "application/json"
@@ -454,15 +588,15 @@ def __assert_link(iam_server: IamServer,
                                                      params=params,
                                                      errors=errors,
                                                      logger=logger)
-        if users:
+        if not errors:
             # verify whether the IAM server that issued the token is a federated identity provider
             # in the associations between 'user_id' and the internal user identification
             internal_id: str = users[0].get("id")
             if logger:
                 logger.debug(msg="Obtaining the providers federated in IAM server "
                                  f"'{iam_server}', for internal identification '{internal_id}'")
-            url = (f"{registry[IamParam.URL_BASE]}/admin/realms/"
-                   f"{registry[IamParam.CLIENT_REALM]}/users/{internal_id}/federated-identity")
+            url = (f"{registry[ServerParam.URL_BASE]}/admin/realms/"
+                   f"{registry[ServerParam.CLIENT_REALM]}/users/{internal_id}/federated-identity")
             providers: list[dict[str, Any]] = __get_for_data(url=url,
                                                              header_data=header_data,
                                                              params=None,
@@ -472,18 +606,18 @@ def __assert_link(iam_server: IamServer,
             provider_name: str = _iam_server_from_issuer(issuer=token_issuer,
                                                          errors=errors,
                                                          logger=logger)
-            if provider_name:
+            if not errors:
                 for provider in providers:
                     if provider.get("identityProvider") == provider_name:
                         no_link = False
                         break
                 if no_link:
                     # link the identities
-                    token_sub: tuple[str] = token_get_values(token=token,
-                                                             keys=("sub",),
-                                                             errors=errors,
-                                                             logger=logger)
-                    if token_sub:
+                    token_sub: str = jwt_get_claim(token=token,
+                                                   key="sub",
+                                                   errors=errors,
+                                                   logger=logger)
+                    if not errors:
                         if logger:
                             logger.debug(msg="Creating an association between identifications "
                                              f"'{user_id}' and '{token_sub}' in IAM server '{iam_server}'")
@@ -525,14 +659,14 @@ def __get_administrative_token(iam_server: IamServer,
                                                  errors=errors,
                                                  logger=logger)
     if registry:
-        if registry[IamParam.ADMIN_ID] and registry[IamParam.ADMIN_SECRET]:
+        if registry[ServerParam.ADMIN_ID] and registry[ServerParam.ADMIN_SECRET]:
             header_data: dict[str, str] = {
                 "Content-Type": "application/x-www-form-urlencoded"
             }
             body_data: dict[str, str] = {
                 "grant_type": "password",
-                "username": registry[IamParam.ADMIN_ID],
-                "password": registry[IamParam.ADMIN_SECRET],
+                "username": registry[ServerParam.ADMIN_ID],
+                "password": registry[ServerParam.ADMIN_SECRET],
                 "client_id": "admin-cli"
             }
             token_data: dict[str, Any] = __post_for_token(iam_server=iam_server,
@@ -548,7 +682,7 @@ def __get_administrative_token(iam_server: IamServer,
 
         elif logger or isinstance(errors, list):
             msg: str = ("Credentials for administrator of realm "
-                        f"'{registry[IamParam.CLIENT_REALM]}' "
+                        f"'{registry[ServerParam.CLIENT_REALM]}' "
                         f"at IAM server '{iam_server}' not provided")
             if logger:
                 logger.error(msg=msg)
@@ -584,7 +718,7 @@ def __get_client_secret(iam_server: IamServer,
     registry: dict[str, Any] = _get_iam_registry(iam_server=iam_server,
                                                  errors=errors,
                                                  logger=logger)
-    result: str = registry[IamParam.CLIENT_SECRET] if registry else None
+    result: str = registry[ServerParam.CLIENT_SECRET] if registry else None
 
     if not result and not errors:
         # obtain a token with administrative rights
@@ -592,13 +726,13 @@ def __get_client_secret(iam_server: IamServer,
                                                 errors=errors,
                                                 logger=logger)
         if token:
-            realm: str = registry[IamParam.CLIENT_REALM]
-            client_id: str = registry[IamParam.CLIENT_ID]
+            realm: str = registry[ServerParam.CLIENT_REALM]
+            client_id: str = registry[ServerParam.CLIENT_ID]
             if logger:
                 logger.debug(msg=f"Obtaining the UUID for client '{client_id}', "
                                  f"in realm '{realm}' at IAM server '{iam_server}'")
             # obtain the client UUID
-            url: str = f"{registry[IamParam.URL_BASE]}/realms/{realm}/clients"
+            url: str = f"{registry[ServerParam.URL_BASE]}/realms/{realm}/clients"
             header_data: dict[str, str] = {
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json"
@@ -626,7 +760,7 @@ def __get_client_secret(iam_server: IamServer,
                 if reply:
                     # store the client's secret password and return it
                     result = reply["value"]
-                    registry[IamParam.CLIENT_ID] = result
+                    registry[ServerParam.CLIENT_ID] = result
     return result
 
 
@@ -790,11 +924,11 @@ def __post_for_token(iam_server: IamServer,
         if registry:
             # complete the data to send in body of request
             if body_data["grant_type"] != "password":
-                body_data["client_id"] = registry[IamParam.CLIENT_ID]
+                body_data["client_id"] = registry[ServerParam.CLIENT_ID]
 
             # build the URL
-            base_url: str = f"{registry[IamParam.URL_BASE]}/realms/{registry[IamParam.CLIENT_REALM]}"
-            url: str = f"{base_url}/protocol/openid-connect/token"
+            url: str = (f"{registry[ServerParam.URL_BASE]}/realms/"
+                        f"{registry[ServerParam.CLIENT_REALM]}/protocol/openid-connect/token")
             #  'client_secret' data must not be shown in log
             msg: str = f"POST {url}, {json.dumps(obj=body_data,
                                                  ensure_ascii=False)}"
@@ -895,16 +1029,16 @@ def __validate_and_store(iam_server: IamServer,
             public_key: str = _get_public_key(iam_server=iam_server,
                                               errors=errors,
                                               logger=logger)
-            recipient_attr = registry[IamParam.RECIPIENT_ATTR]
+            recipient_attr = registry[ServerParam.RECIPIENT_ATTR]
             login_id = user_data.pop("login-id", None)
-            base_url: str = f"{registry[IamParam.URL_BASE]}/realms/{registry[IamParam.CLIENT_REALM]}"
-            claims: dict[str, dict[str, Any]] = token_validate(token=token,
-                                                               issuer=base_url,
-                                                               recipient_id=login_id,
-                                                               recipient_attr=recipient_attr,
-                                                               public_key=public_key,
-                                                               errors=errors,
-                                                               logger=logger)
+            base_url: str = f"{registry[ServerParam.URL_BASE]}/realms/{registry[ServerParam.CLIENT_REALM]}"
+            claims: dict[str, dict[str, Any]] = jwt_validate(token=token,
+                                                             issuer=base_url,
+                                                             recipient_id=login_id,
+                                                             recipient_attr=recipient_attr,
+                                                             public_key=public_key,
+                                                             errors=errors,
+                                                             logger=logger)
             if claims:
                 users: dict[str, dict[str, Any]] = _get_iam_users(iam_server=iam_server,
                                                                   errors=errors,

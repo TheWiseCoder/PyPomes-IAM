@@ -1,42 +1,42 @@
 from .iam_actions import (
-    action_callback, action_exchange,
-    action_login, action_logout, action_token
+    iam_callback, iam_exchange,
+    iam_login, iam_logout, iam_get_token, iam_userinfo
 )
 from .iam_common import (
-    IamServer, IamParam
+    IamServer, ServerParam
 )
 from .iam_pomes import (
     iam_setup_server, iam_setup_endpoints
 )
 from .iam_services import (
     jwt_required, iam_setup_logger,
-    service_login, service_logout, service_callback,
-    service_exchange, service_callback_and_exchange, service_token
+    service_setup_server, service_login, service_logout,
+    service_get_token, service_userinfo, service_callback,
+    service_exchange, service_callback_exchange
 )
 from .provider_pomes import (
-    provider_setup_server, provider_setup_endpoint, provider_setup_logger,
-    service_jwt_token, action_jwt_token
-)
-from .token_pomes import (
-    token_get_claims, token_get_values, token_validate
+    IamProvider, ProviderParam,
+    service_get_token, provider_get_token,
+    iam_setup_provider, provider_setup_endpoint, provider_setup_logger
 )
 
 __all__ = [
     # iam_actions
-    "action_callback", "action_exchange",
-    "action_login", "action_logout", "action_token",
+    "iam_callback", "iam_exchange",
+    "iam_login", "iam_logout", "iam_get_token", "iam_userinfo",
     # iam_commons
-    "IamServer", "IamParam",
+    "IamServer", "ServerParam",
     # iam_pomes
     "iam_setup_server", "iam_setup_endpoints",
     # iam_services
     "jwt_required", "iam_setup_logger",
-    "service_login", "service_logout", "service_callback",
-    "service_exchange", "service_callback_and_exchange", "service_token",
+    "service_setup_server", "service_login", "service_logout",
+    "service_get_token", "service_userinfo", "service_callback",
+    "service_exchange", "service_callback_exchange",
     # provider_pomes
-    "provider_setup_server", "action_jwt_token",
-    # token_pomes
-    "token_get_claims", "token_get_values", "token_validate"
+    "IamProvider", "ProviderParam",
+    "service_get_token", "provider_get_token",
+    "iam_setup_provider", "provider_setup_endpoint", "provider_setup_logger",
 ]
 
 from importlib.metadata import version
