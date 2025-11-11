@@ -11,7 +11,7 @@ from .iam_common import (
 from .iam_services import (
     service_login, service_logout,
     service_callback, service_callback_exchange,
-    service_exchange, service_refresh, service_userinfo
+    service_exchange, service_refresh, service_token, service_userinfo
 )
 
 
@@ -184,7 +184,7 @@ def iam_setup_endpoints(flask_app: Flask,
     if token_endpoint:
         flask_app.add_url_rule(rule=token_endpoint,
                                endpoint=f"{iam_server}-token",
-                               view_func=service_refresh,
+                               view_func=service_token,
                                methods=["GET"])
     if userinfo_endpoint:
         flask_app.add_url_rule(rule=userinfo_endpoint,

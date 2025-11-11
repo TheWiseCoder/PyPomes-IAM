@@ -261,7 +261,7 @@ def service_get_token() -> Response:
     token: str | None = None
     errors: list[str] = []
     if iam_provider:
-        trusted_hosts: list[str] = _provider_registry[iam_provider][ProviderParam.TRUSTED_HOSTS]
+        trusted_hosts: list[str] = _provider_registry[iam_provider][ProviderParam.TRUSTED_HOSTS] or []
         if not trusted_hosts or request.host in trusted_hosts:
             token: str = provider_get_token(iam_provider=iam_provider,
                                             errors=errors,
