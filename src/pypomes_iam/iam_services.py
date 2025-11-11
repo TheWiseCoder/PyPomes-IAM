@@ -11,7 +11,7 @@ from .iam_common import (
 )
 from .iam_actions import (
     iam_login, iam_logout, iam_callback,
-    iam_exchange, iam_refresh, iam_userinfo
+    iam_exchange, iam_refresh, iam_token, iam_userinfo
 )
 
 # the logger for IAM service operations
