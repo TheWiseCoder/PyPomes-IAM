@@ -1,6 +1,6 @@
 from .iam_actions import (
     iam_callback, iam_exchange,
-    iam_login, iam_logout, iam_get_token, iam_userinfo
+    iam_login, iam_logout, iam_refresh, iam_userinfo
 )
 from .iam_common import (
     IamServer, ServerParam
@@ -11,7 +11,7 @@ from .iam_pomes import (
 from .iam_services import (
     jwt_required, iam_setup_logger,
     service_setup_server, service_login, service_logout,
-    service_get_token, service_userinfo, service_callback,
+    service_refresh, service_userinfo, service_callback,
     service_exchange, service_callback_exchange
 )
 from .provider_pomes import (
@@ -23,7 +23,7 @@ from .provider_pomes import (
 __all__ = [
     # iam_actions
     "iam_callback", "iam_exchange",
-    "iam_login", "iam_logout", "iam_get_token", "iam_userinfo",
+    "iam_login", "iam_logout", "iam_refresh", "iam_userinfo",
     # iam_commons
     "IamServer", "ServerParam",
     # iam_pomes
@@ -31,11 +31,11 @@ __all__ = [
     # iam_services
     "jwt_required", "iam_setup_logger",
     "service_setup_server", "service_login", "service_logout",
-    "service_get_token", "service_userinfo", "service_callback",
+    "service_refresh", "service_userinfo", "service_callback",
     "service_exchange", "service_callback_exchange",
     # provider_pomes
     "IamProvider", "ProviderParam",
-    "service_get_token", "provider_get_token",
+    "service_refresh", "provider_get_token",
     "iam_setup_provider", "provider_setup_endpoint", "provider_setup_logger",
 ]
 

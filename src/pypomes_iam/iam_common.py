@@ -30,12 +30,14 @@ class ServerParam(StrEnum):
     ENDPOINT_CALLBACK_EXCHANGE = "endpoint-callback-exchange"
     ENDPOINT_LOGIN = "endpoint-login"
     ENDPOINT_LOGOUT = "endpoint_logout"
+    ENDPOINT_REFRESH = "endpoint-refresh"
     ENDPOINT_TOKEN = "endpoint-token"
     ENDPOINT_EXCHANGE = "endpoint-exchange"
     LOGIN_TIMEOUT = "login-timeout"
     PK_EXPIRATION = "pk-expiration"
     PK_LIFETIME = "pk-lifetime"
     RECIPIENT_ATTR = "recipient-attr"
+    TRUSTED_HOSTS = "trusted-hosts"
     # dynamic attributes
     PUBLIC_KEY = "public-key"
     URL_BASE = "url-base"
@@ -75,19 +77,27 @@ def __get_iam_data() -> dict[IamServer, dict[ServerParam, Any]]:
           - *<APP_PREFIX>_<IAM>_LOGIN_TIMEOUT*      (optional, defaults to no timeout)
           - *<APP_PREFIX>_<IAM>_PK_LIFETIME*        (optional, defaults to non-terminating lifetime)
           - *<APP_PREFIX>_<IAM>_RECIPIENT_ATTR*     (required)
+          - *<APP_PREFIX>_<IAM>_TRUSTED_HOSTS*      (optional)
           - *<APP_PREFIX>_<IAM>_URL_BASE*           (required)
 
     2. A group of special environment variables identifying endpoints for authentication services may be specified,
-       following the same scheme as presented in item *1* above. These are not part of the *IAM* server's setup,
-       but are meant to be used by function *iam_setup_endpoints()*, wherein the values in those variables
+       following the same scheme as presented in item *1* above. These are the second part of the *IAM* server's
+       setup, and are meant to be used by function *iam_setup_endpoints()*, wherein the values in those variables
        would represent default values for its parameters, respectively:
           - *<APP_PREFIX>_<IAM>_ENDPOINT_CALLBACK*
           - *<APP_PREFIX>_<IAM>_ENDPOINT_CALLBACK_EXCHANGE*
           - *<APP_PREFIX>_<IAM>_ENDPOINT_EXCHANGE*
           - *<APP_PREFIX>_<IAM>_ENDPOINT_LOGIN*
           - *<APP_PREFIX>_<IAM>_ENDPOINT_LOGOUT*
+          - *<APP_PREFIX>_<IAM>_ENDPOINT_REFRESH*
           - *<APP_PREFIX>_<IAM>_ENDPOINT_TOKEN*
           - *<APP_PREFIX>_<IAM>_ENDPOINT_USERINFO*
+
+    3. One of the above endpoints, namely *<APP_PREFIX>_<IAM>_ENDPOINT_TOKEN*, requires special protection.
+       By its very nature, it is expected to be seldomly needed, and if indeed used, limited in scope and
+       restricted to specific parties. This is the purpose of the special environment variable
+       *<APP_PREFIX>_<IAM>_TRUSTED_HOSTS*, which, if specified, will list the only requesting hosts
+       allowed to be serviced at that endpoint.
 
     :return: the configuration data for the select *IAM* servers.
     """
@@ -105,6 +115,7 @@ def __get_iam_data() -> dict[IamServer, dict[ServerParam, Any]]:
             ServerParam.LOGIN_TIMEOUT: env_get_str(key=f"{APP_PREFIX}_{prefix}_LOGIN_TIMEOUT"),
             ServerParam.PK_LIFETIME: env_get_int(key=f"{APP_PREFIX}_{prefix}_PK_LIFETIME"),
             ServerParam.RECIPIENT_ATTR: env_get_str(key=f"{APP_PREFIX}_{prefix}_RECIPIENT_ATTR"),
+            ServerParam.TRUSTED_HOSTS: env_get_strs(key=f"{APP_PREFIX}_{prefix}_TRUSTED_HOSTS"),
             ServerParam.URL_BASE: env_get_str(key=f"{APP_PREFIX}_{prefix}_URL_BASE"),
             # dynamically set
             ServerParam.PK_EXPIRATION: 0,
@@ -130,6 +141,7 @@ def __get_iam_data() -> dict[IamServer, dict[ServerParam, Any]]:
 #       "public-key": <str>,
 #       "pk-lifetime": <int>,
 #       "pk-expiration": <int>,
+#       "truted-requesters>: <list[str]>,
 #       "users": {}
 #    },
 #    ...
@@ -338,6 +350,25 @@ def _get_iam_registry(iam_server: IamServer,
             errors.append(msg)
 
     return result
+
+
+def _get_iam_property(iam_server: IamServer,
+                      attr: ServerParam,
+                      errors: list[str] | None,
+                      logger: Logger | None) -> list[str] | str | int:
+    """
+    Retrieve the value of *attr* in the registry associated with *iam_server*.
+
+    :param iam_server: the reference registered *IAM* server
+    :param errors: incidental error messages
+    :param logger: optional logger
+    :return: the registry associated with *iam_server*, or *None* if the server is unknown
+    """
+    # obtain the registry
+    registry: dict[str, Any] = _get_iam_registry(iam_server=iam_server,
+                                                 errors=errors,
+                                                 logger=logger)
+    return registry[attr] if registry else None
 
 
 def _get_iam_users(iam_server: IamServer,

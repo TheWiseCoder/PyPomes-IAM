@@ -33,6 +33,7 @@ class ProviderParam(StrEnum):
     ACCESS_EXPIRATION = "access-expiration"
     REFRESH_TOKEN = "refresh-token"
     REFRESH_EXPIRATION = "refresh-expiration"
+    TRUSTED_HOSTS = "trusted-hosts"
     URL_TOKEN = "url-token"
 
 
@@ -54,14 +55,20 @@ def __get_provider_data() -> dict[IamProvider, dict[ProviderParam, Any]]:
           - *<APP_PREFIX>_<IAM>_BODY_DATA*            (optional)
           - *<APP_PREFIX>_<IAM>_CUSTOM_AUTH*          (optional)
           - *<APP_PREFIX>_<IAM>_HEADER_DATA*          (optional)
+          - *<APP_PREFIX>_<IAM>_TRUSTED_HOSTS*        (optional)
           - *<APP_PREFIX>_<IAM>_USER_ID*              (required)
           - *<APP_PREFIX>_<IAM>_USER_SECRET*          (required)
           - *<APP_PREFIX>_<IAM>_URL_TOKEN*            (required)
 
     2. The special environment variable *<APP_PREFIX>_PROVIDER_ENDPOINT_TOKEN* identifies the endpoint
-       from which to obtain JWT tokens. It is not part of the *JWT* providers' setup, but is meant to be
-       used by function *provider_setup_endpoint()*, wherein the value in that variable would represent
-       the default value for its parameter.
+       from which to obtain JWT tokens. This is the second part of the *JWT* providers' setup,
+       and is meant to be used by function *provider_setup_endpoint()*, wherein the value in that variable
+       would represent the default value for its parameter.
+
+    3. This endpoint requires special protection. By its very nature, it is restricted to specific parties.
+       This is the purpose of the special environment variable *<APP_PREFIX>_<IAM>_TRUSTED_HOSTS*,
+       which, if specified, will list the only requesting hosts allowed to be serviced at that endpoint,
+       for the provider specified.
 
     :return: the configuration data for the select *IAM* providers.
     """
@@ -76,6 +83,7 @@ def __get_provider_data() -> dict[IamProvider, dict[ProviderParam, Any]]:
             ProviderParam.BODY_DATA: env_get_obj(key=f"{APP_PREFIX}_{prefix}_BODY_DATA"),
             ProviderParam.CUSTOM_AUTH: env_get_strs(key=f"{APP_PREFIX}_{prefix}_CUSTOM_AUTH"),
             ProviderParam.HEADER_DATA: env_get_obj(key=f"{APP_PREFIX}_{prefix}_HEADER_DATA"),
+            ProviderParam.TRUSTED_HOSTS: env_get_strs(key=f"{APP_PREFIX}_{prefix}_TRUSTED_HOSTS"),
             ProviderParam.URL_TOKEN: env_get_str(key=f"{APP_PREFIX}_{prefix}_URL_TOKEN"),
             ProviderParam.ACCESS_TOKEN: None,
             ProviderParam.ACCESS_EXPIRATION: 0,
@@ -92,6 +100,7 @@ def __get_provider_data() -> dict[IamProvider, dict[ProviderParam, Any]]:
 #      "body-data": <dict[str, str],
 #      "custom-auth": <tuple[str, str]>,
 #      "headers-data": <dict[str, str]>,
+#      "trusted-hosts": <list[str]>,
 #      "user-id": <str>,
 #      "user-secret": <str>,
 #      "url-token": <strl>,
@@ -116,6 +125,7 @@ def iam_setup_provider(iam_provider: IamProvider,
                        custom_auth: tuple[str, str] = None,
                        header_data: dict[str, str] = None,
                        body_data: dict[str, str] = None,
+                       trusted_hosts: list[str] = None,
                        url_token: str = None) -> None:
     """
     Setup the *IAM* provider *iam_provider*.
@@ -138,6 +148,7 @@ def iam_setup_provider(iam_provider: IamProvider,
     :param custom_auth: optional key names for sending the credentials as key-value pairs in the body of the request
     :param header_data: optional key-value pairs to be added to the request headers
     :param body_data: optional key-value pairs to be added to the request body
+    :param trusted_hosts: one or more hosts allowed to be serviced at the 'get token' endpoint
     :param url_token: the url to request *JWT* tokens with
     """
     global _provider_registry
@@ -157,6 +168,8 @@ def iam_setup_provider(iam_provider: IamProvider,
         header_data = env_get_obj(key=f"{APP_PREFIX}_{prefix}_HEADER_DATA")
     if "body_data" in defaulted_params:
         body_data = env_get_obj(key=f"{APP_PREFIX}_{prefix}_BODY_DATA")
+    if "trusted_hosts" in defaulted_params:
+        trusted_hosts = env_get_strs(key=f"{APP_PREFIX}_{prefix}_TRUSTED_HOSTS")
     if "url_token" in defaulted_params:
         url_token = env_get_str(key=f"{APP_PREFIX}_{prefix}_URL_TOKEN")
 
@@ -167,6 +180,7 @@ def iam_setup_provider(iam_provider: IamProvider,
             ProviderParam.HEADER_DATA: header_data,
             ProviderParam.USER_ID: user_id,
             ProviderParam.USER_SECRET: user_secret,
+            ProviderParam.TRUSTED_HOSTS: trusted_hosts,
             ProviderParam.URL_TOKEN: url_token,
             # dynamically set
             ProviderParam.ACCESS_TOKEN: None,
@@ -198,7 +212,7 @@ def provider_setup_endpoint(flask_app: Flask,
     # establish the endpoints
     if provider_endpoint:
         flask_app.add_url_rule(rule=provider_endpoint,
-                               endpoint=f"provider-get-token",
+                               endpoint=f"provider-token",
                                view_func=service_get_token,
                                methods=["GET"])
 
@@ -228,6 +242,9 @@ def service_get_token() -> Response:
 
     :return: *Response* containing the JWT token, or *BAD REQUEST*
     """
+    # initialize the return variable
+    result: Response | None = None
+
     # retrieve the request arguments
     args: dict[str, Any] = dict(request.args) or {}
 
@@ -244,21 +261,29 @@ def service_get_token() -> Response:
     token: str | None = None
     errors: list[str] = []
     if iam_provider:
-        token: str = provider_get_token(iam_provider=iam_provider,
-                                        errors=errors,
-                                        logger=__JWT_LOGGER)
+        trusted_hosts: list[str] = _provider_registry[iam_provider][ProviderParam.TRUSTED_HOSTS]
+        if not trusted_hosts or request.host in trusted_hosts:
+            token: str = provider_get_token(iam_provider=iam_provider,
+                                            errors=errors,
+                                            logger=__JWT_LOGGER)
+        else:
+            if __JWT_LOGGER:
+                __JWT_LOGGER.error(msg=f"Not authorized: '{request.host}' not a trusted host")
+            result = Response(response="Not authorized",
+                              status=401)
     else:
         msg: str = "IAM provider unknown or not informed"
         errors.append(msg)
         if __JWT_LOGGER:
             __JWT_LOGGER.error(msg=msg)
 
-    result: Response
-    if errors:
-        result = Response(response="; ".join(errors),
-                          status=400)
-    else:
-        result = jsonify({"access-token": token})
+    if not result:
+        if errors:
+            result = Response(response="; ".join(errors),
+                              status=400)
+        else:
+            result = jsonify({"access-token": token})
+
     if __JWT_LOGGER:
         # log the response (the returned data is not logged, as it contains the token)
         __JWT_LOGGER.debug(msg=f"Response {result}")

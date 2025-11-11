@@ -1,7 +1,7 @@
 from flask import Flask
 from pypomes_core import (
     APP_PREFIX,
-    env_get_int, env_get_str,
+    env_get_int, env_get_str, env_get_strs,
     func_capture_params, func_defaulted_params
 )
 
@@ -11,7 +11,7 @@ from .iam_common import (
 from .iam_services import (
     service_login, service_logout,
     service_callback, service_callback_exchange,
-    service_exchange, service_get_token, service_userinfo
+    service_exchange, service_refresh, service_userinfo
 )
 
 
@@ -25,6 +25,7 @@ def iam_setup_server(iam_server: IamServer,
                      login_timeout: int = None,
                      pk_lifetime: int = None,
                      recipient_attr: str = None,
+                     trusted_hosts: list[str] = None,
                      url_base: str = None) -> None:
     """
     Setup the *IAM* server *iam_server*.
@@ -50,6 +51,7 @@ def iam_setup_server(iam_server: IamServer,
     :param login_timeout: timeout for login authentication (in seconds,defaults to no timeout)
     :param pk_lifetime: how long to use *IAM* server's public key, before refreshing it (in seconds)
     :param recipient_attr: attribute in the token's payload holding the token's subject
+    :param trusted_hosts: one or more hosts allowed to be serviced at the 'get token' endpoint
     :param url_base: base URL to request services
     """
     # obtain the defaulted parameters
@@ -73,6 +75,8 @@ def iam_setup_server(iam_server: IamServer,
         pk_lifetime = env_get_int(key=f"{APP_PREFIX}_{prefix}_PK_LIFETIME")
     if "recipient_attr" in defaulted_params:
         recipient_attr = env_get_str(key=f"{APP_PREFIX}_{prefix}_RECIPIENT_ATTR")
+    if "trusted_hosts" in defaulted_params:
+        trusted_hosts = env_get_strs(key=f"{APP_PREFIX}_{prefix}_TRUSTED_HOSTS")
     if "url_base" in defaulted_params:
         url_base = env_get_str(key=f"{APP_PREFIX}_{prefix}_URL_BASE")
 
@@ -87,6 +91,7 @@ def iam_setup_server(iam_server: IamServer,
             ServerParam.ADMIN_SECRET: admin_secret,
             ServerParam.LOGIN_TIMEOUT: login_timeout,
             ServerParam.PK_LIFETIME: pk_lifetime,
+            ServerParam.TRUSTED_HOSTS: trusted_hosts,
             ServerParam.URL_BASE: url_base,
             # dynamic attributes
             ServerParam.PK_EXPIRATION: 0,
@@ -103,6 +108,7 @@ def iam_setup_endpoints(flask_app: Flask,
                         exchange_endpoint: str = None,
                         login_endpoint: str = None,
                         logout_endpoint: str = None,
+                        refresh_endpoint: str = None,
                         token_endpoint: str = None,
                         userinfo_endpoint: str = None) -> None:
     """
@@ -118,7 +124,8 @@ def iam_setup_endpoints(flask_app: Flask,
     :param exchange_endpoint: endpoint for requesting token exchange
     :param login_endpoint: endpoint for redirecting user to the *IAM* server's login page
     :param logout_endpoint: endpoint for terminating user access
-    :param token_endpoint: endpoint for retrieving authentication token
+    :param refresh_endpoint: endpoint for refreshing an authentication token
+    :param token_endpoint: endpoint for acquiring an authentication token
     :param userinfo_endpoint: endpoint for retrieving user data
     """
     # obtain the defaulted parameters
@@ -136,6 +143,8 @@ def iam_setup_endpoints(flask_app: Flask,
         login_endpoint = env_get_str(key=f"{APP_PREFIX}_{prefix}_ENDPOINT_LOGIN")
     if "logout_endpoint" in defaulted_params:
         logout_endpoint = env_get_str(key=f"{APP_PREFIX}_{prefix}_ENDPOINT_LOGOUT")
+    if "refresh_endpoint" in defaulted_params:
+        refresh_endpoint = env_get_str(key=f"{APP_PREFIX}_{prefix}_ENDPOINT_REFRESH")
     if "token_endpoint" in defaulted_params:
         token_endpoint = env_get_str(key=f"{APP_PREFIX}_{prefix}_ENDPOINT_TOKEN")
     if "userinfo_endpoint" in defaulted_params:
@@ -167,10 +176,15 @@ def iam_setup_endpoints(flask_app: Flask,
                                endpoint=f"{iam_server}-logout",
                                view_func=service_logout,
                                methods=["POST"])
+    if refresh_endpoint:
+        flask_app.add_url_rule(rule=refresh_endpoint,
+                               endpoint=f"{iam_server}-refresh",
+                               view_func=service_refresh,
+                               methods=["GET"])
     if token_endpoint:
         flask_app.add_url_rule(rule=token_endpoint,
                                endpoint=f"{iam_server}-token",
-                               view_func=service_get_token,
+                               view_func=service_refresh,
                                methods=["GET"])
     if userinfo_endpoint:
         flask_app.add_url_rule(rule=userinfo_endpoint,

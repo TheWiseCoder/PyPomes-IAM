@@ -10,8 +10,8 @@ from pypomes_crypto import jwt_get_claim, jwt_validate
 from typing import Any
 
 from .iam_common import (
-    IamServer, ServerParam, UserParam, _iam_lock,
-    _get_iam_users, _get_iam_registry, _get_public_key,
+    IamServer, ServerParam, UserParam, _iam_lock, _get_iam_users,
+    _get_iam_registry, _get_iam_property, _get_public_key,
     _get_login_timeout, _get_user_data, _iam_server_from_issuer
 )
 
@@ -23,7 +23,7 @@ def iam_login(iam_server: IamServer,
     """
     Build the URL for redirecting the request to *iam_server*'s authentication page.
 
-    These are the expected attributes in *args*:
+    The expected attributes in *args* are:
         - user-id: optional, identifies the reference user (alias: 'login')
         - redirect-uri: a parameter to be added to the query part of the returned URL
         -target-idp: optionally, identify a target identity provider for the login operation
@@ -101,6 +101,7 @@ def iam_logout(iam_server: IamServer,
     Logout the user, by removing all data associating it from *iam_server*'s registry.
 
     The user is identified by the attribute *user-id* or *login*, provided in *args*.
+
     A logout request is sent to *iam_server* and, if successful, remove all data relating to the user
     from the *IAM* server's registry.
 
@@ -175,10 +176,75 @@ def iam_logout(iam_server: IamServer,
             errors.append(msg)
 
 
-def iam_get_token(iam_server: IamServer,
-                  args: dict[str, Any],
-                  errors: list[str] = None,
-                  logger: Logger = None) -> dict[str, str]:
+def iam_refresh(iam_server: IamServer,
+                args: dict[str, Any],
+                errors: list[str] = None,
+                logger: Logger = None) -> dict[str, str]:
+    """
+    Refresh the authentication token for the user, from *iam_server*.
+
+    The expected parameters in *args* are:
+        - user-id: identification for the reference user (alias: 'login')
+        - access-token: the old, probable expíred, token to be refreshed
+
+    On success, the returned *dict* will contain the following JSON:
+        {
+            "access-token": <token>,
+            "user-id": <user-identification
+        }
+
+    :param iam_server: the reference registered *IAM* server
+    :param args: the arguments passed when requesting the service
+    :param errors: incidental error messages
+    :param logger: optional logger
+    :return: the user identification and token issued, or *None* if error
+    """
+    # initialize the return variable
+    result: dict[str, str] | None = None
+
+    # obtain the user's identification ant the token
+    user_id: str = args.get("user-id") or args.get("login")
+    user_token: str = args.get("access-token")
+
+    err_msg: str | None = None
+    if user_id:
+        with _iam_lock:
+            # retrieve the user data in the IAM server's registry
+            user_data: dict[str, Any] = _get_user_data(iam_server=iam_server,
+                                                       user_id=user_id,
+                                                       errors=errors,
+                                                       logger=logger)
+            # retrieve the stored access token
+            access_token: str = user_data[UserParam.ACCESS_TOKEN] if user_data else None
+            if access_token:
+                if access_token == user_token:
+                    result = __retrieve_token(iam_server=iam_server,
+                                              user_id=user_id,
+                                              errors=errors,
+                                              logger=logger)
+                else:
+                    err_msg = "Tokens do not match"
+                    if logger:
+                        logger.error(msg=err_msg)
+            else:
+                err_msg = f"User '{user_id}' not authenticated"
+                if logger:
+                    logger.error(msg=err_msg)
+    else:
+        err_msg = "User identification not provided"
+        if logger:
+            logger.error(msg=err_msg)
+
+    if err_msg and isinstance(errors, list):
+        errors.append(err_msg)
+
+    return result
+
+
+def iam_token(iam_server: IamServer,
+              args: dict[str, Any],
+              errors: list[str] = None,
+              logger: Logger = None) -> dict[str, str]:
     """
     Retrieve the authentication token for the user, from *iam_server*.
 
@@ -199,81 +265,21 @@ def iam_get_token(iam_server: IamServer,
     # initialize the return variable
     result: dict[str, str] | None = None
 
-    # obtain the user's identification
+    # obtain the user's identification ant the token
     user_id: str = args.get("user-id") or args.get("login")
 
-    err_msg: str | None = None
     if user_id:
         with _iam_lock:
-            # retrieve the user data in the IAM server's registry
-            user_data: dict[str, Any] = _get_user_data(iam_server=iam_server,
-                                                       user_id=user_id,
-                                                       errors=errors,
-                                                       logger=logger)
-            # retrieve the stored access token
-            token: str = user_data[UserParam.ACCESS_TOKEN] if user_data else None
-            if token:
-                access_expiration: int = user_data.get(UserParam.ACCESS_EXPIRATION)
-                now: int = int(datetime.now(tz=TZ_LOCAL).timestamp())
-                if now < access_expiration:
-                    result = {
-                        "access-token": token,
-                        "user-id": user_id
-                    }
-                else:
-                    # access token has expired
-                    refresh_token: str = user_data[UserParam.REFRESH_TOKEN]
-                    if refresh_token:
-                        refresh_expiration: int = user_data[UserParam.REFRESH_EXPIRATION]
-                        if now < refresh_expiration:
-                            header_data: dict[str, str] = {
-                                "Content-Type": "application/x-www-form-urlencoded"
-                            }
-                            body_data: dict[str, str] = {
-                                "grant_type": "refresh_token",
-                                "refresh_token": refresh_token
-                            }
-                            now: int = int(datetime.now(tz=TZ_LOCAL).timestamp())
-                            token_data: dict[str, Any] = __post_for_token(iam_server=iam_server,
-                                                                          header_data=header_data,
-                                                                          body_data=body_data,
-                                                                          errors=errors,
-                                                                          logger=logger)
-                            # validate and store the token data
-                            if token_data:
-                                token_info: tuple[str, str] = __validate_and_store(iam_server=iam_server,
-                                                                                   user_data=user_data,
-                                                                                   token_data=token_data,
-                                                                                   now=now,
-                                                                                   errors=errors,
-                                                                                   logger=logger)
-                                result = {
-                                    "access-token": token_info[1],
-                                    "user-id": user_id
-                                }
-                            else:
-                                # refresh token is no longer valid
-                                user_data[UserParam.REFRESH_TOKEN] = None
-                        else:
-                            # refresh token has expired
-                            err_msg = "Access and refresh tokens expired"
-                            if logger:
-                                logger.error(msg=err_msg)
-                    else:
-                        err_msg = "Access token expired, no refresh token available"
-                        if logger:
-                            logger.error(msg=err_msg)
-            else:
-                err_msg = f"User '{user_id}' not authenticated"
-                if logger:
-                    logger.error(msg=err_msg)
+            result = __retrieve_token(iam_server=iam_server,
+                                      user_id=user_id,
+                                      errors=errors,
+                                      logger=logger)
     else:
-        err_msg = "User identification not provided"
+        msg: str = "User identification not provided"
         if logger:
-            logger.error(msg=err_msg)
-
-    if err_msg and isinstance(errors, list):
-        errors.append(err_msg)
+            logger.error(msg=msg)
+        if isinstance(errors, list):
+            errors.append(msg)
 
     return result
 
@@ -285,7 +291,7 @@ def iam_callback(iam_server: IamServer,
     """
     Entry point for the callback from *iam_server* via the front-end application, on authentication operations.
 
-    The relevant expected arguments in *args* are:
+    The expected arguments in *args* are:
         - *state*: used to enhance security during the authorization process, typically to provide *CSRF* protection
         - *code*: the temporary authorization code provided by *iam_server*, to be exchanged for the token
 
@@ -434,10 +440,11 @@ def iam_exchange(iam_server: IamServer,
         if not errors:
             with _iam_lock:
                 # retrieve the IAM server's registry
-                registry: dict[str, Any] = _get_iam_registry(iam_server=iam_server,
-                                                             errors=errors,
-                                                             logger=logger)
-                if registry:
+                client_id: str = _get_iam_property(iam_server=iam_server,
+                                                   attr=ServerParam.CLIENT_ID,
+                                                   errors=errors,
+                                                   logger=logger)
+                if client_id:
                     # make sure 'client_id' is linked to the token's 'token_sub' at the IAM server
                     __assert_link(iam_server=iam_server,
                                   user_id=user_id,
@@ -457,7 +464,7 @@ def iam_exchange(iam_server: IamServer,
                             "subject_token": token,
                             "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
                             "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
-                            "audience": registry[ServerParam.CLIENT_ID],
+                            "audience": client_id,
                             "subject_issuer": token_issuer
                         }
                         now: int = int(datetime.now(tz=TZ_LOCAL).timestamp())
@@ -978,6 +985,92 @@ def __post_for_token(iam_server: IamServer,
 
     if err_msg and isinstance(errors, list):
         errors.append(err_msg)
+
+    return result
+
+
+def __retrieve_token(iam_server: IamServer,
+                     user_id: str,
+                     errors: list[str] | None,
+                     logger: Logger | None) -> dict[str, str]:
+    """
+    Retrieve the token associated with *user_id* from the *IAM* registry.
+
+    :param iam_server: the reference registered *IAM* server
+    :param user_id: the identification for the user
+    :param errors: incidental errors
+    :param logger: optional logger
+    :return: the token data, or *None* if error
+    """
+    # initialize the return variable
+    result: dict[str, str] | None = None
+
+    # retrieve the user data in the IAM server's registry
+    user_data: dict[str, Any] = _get_user_data(iam_server=iam_server,
+                                               user_id=user_id,
+                                               errors=errors,
+                                               logger=logger)
+    # retrieve the stored access token
+    access_token: str = user_data[UserParam.ACCESS_TOKEN] if user_data else None
+    if access_token:
+        # access token has expired
+        refresh_token: str = user_data[UserParam.REFRESH_TOKEN]
+        if refresh_token:
+            access_expiration: int = user_data.get(UserParam.ACCESS_EXPIRATION)
+            now: int = int(datetime.now(tz=TZ_LOCAL).timestamp())
+            if now < access_expiration:
+                # token has not expired, so return it
+                result = {
+                    "access-token": access_token,
+                    "user-id": user_id
+                }
+            else:
+                # access token has expired
+                refresh_token: str = user_data[UserParam.REFRESH_TOKEN]
+                if refresh_token:
+                    refresh_expiration: int = user_data[UserParam.REFRESH_EXPIRATION]
+                    if now < refresh_expiration:
+                        header_data: dict[str, str] = {
+                            "Content-Type": "application/x-www-form-urlencoded"
+                        }
+                        body_data: dict[str, str] = {
+                            "grant_type": "refresh_token",
+                            "refresh_token": refresh_token
+                        }
+                        now: int = int(datetime.now(tz=TZ_LOCAL).timestamp())
+                        token_data: dict[str, Any] = __post_for_token(iam_server=iam_server,
+                                                                      header_data=header_data,
+                                                                      body_data=body_data,
+                                                                      errors=errors,
+                                                                      logger=logger)
+                        # validate and store the token data
+                        if token_data:
+                            token_info: tuple[str, str] = __validate_and_store(iam_server=iam_server,
+                                                                               user_data=user_data,
+                                                                               token_data=token_data,
+                                                                               now=now,
+                                                                               errors=errors,
+                                                                               logger=logger)
+                            result = {
+                                "access-token": token_info[1],
+                                "user-id": user_id
+                            }
+                        else:
+                            # refresh token is no longer valid
+                            user_data[UserParam.REFRESH_TOKEN] = None
+                    else:
+                        # refresh token has expired
+                        err_msg = "Access and refresh tokens expired"
+                        if logger:
+                            logger.error(msg=err_msg)
+                else:
+                    err_msg = "Access token expired, no refresh token available"
+                    if logger:
+                        logger.error(msg=err_msg)
+    else:
+        err_msg = f"User '{user_id}' not authenticated"
+        if logger:
+            logger.error(msg=err_msg)
 
     return result
 
