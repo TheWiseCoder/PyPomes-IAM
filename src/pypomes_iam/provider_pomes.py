@@ -250,8 +250,11 @@ def service_get_token() -> Response:
 
     # log the request
     if __JWT_LOGGER:
-        __JWT_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
-                                                                                      ensure_ascii=False)}")
+        origin: str = request.headers.get("X-Forwarded-For",
+                                          request.remote_addr)
+        params: str = json.dumps(obj=args,
+                                 ensure_ascii=False)
+        __JWT_LOGGER.debug(msg=f"Request {request.method}:{request.path}, {origin}; {params}")
 
     # obtain the provider JWT
     provider_id: str = args.get("iam-provider")
@@ -261,14 +264,16 @@ def service_get_token() -> Response:
     token: str | None = None
     errors: list[str] = []
     if iam_provider:
-        trusted_hosts: list[str] = _provider_registry[iam_provider][ProviderParam.TRUSTED_HOSTS] or []
-        if not trusted_hosts or request.host in trusted_hosts:
+        trusted_hosts: list[str] = _provider_registry[iam_provider].get(ProviderParam.TRUSTED_HOSTS, [])
+        remote_addr: str = request.headers.get("X-Forwarded-For",
+                                               request.remote_addr)
+        if not trusted_hosts or remote_addr in trusted_hosts:
             token: str = provider_get_token(iam_provider=iam_provider,
                                             errors=errors,
                                             logger=__JWT_LOGGER)
         else:
             if __JWT_LOGGER:
-                __JWT_LOGGER.error(msg=f"Not authorized: '{request.host}' not a trusted host")
+                __JWT_LOGGER.error(msg=f"Not authorized: '{remote_addr}' not a trusted host")
             result = Response(response="Not authorized",
                               status=401)
     else:

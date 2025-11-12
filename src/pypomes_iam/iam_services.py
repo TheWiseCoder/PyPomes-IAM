@@ -165,8 +165,8 @@ def service_setup_server() -> Response:
 
     # log the request
     if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
-                                                                                      ensure_ascii=False)}")
+        __IAM_LOGGER.debug(msg=__log_init(req=request,
+                                          args=args))
     # setup the server
     from .iam_pomes import iam_setup_server
     iam_setup_server(**args)
@@ -211,8 +211,8 @@ def service_login() -> Response:
 
     # log the request
     if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
-                                                                                      ensure_ascii=False)}")
+        __IAM_LOGGER.debug(msg=__log_init(req=request,
+                                          args=args))
     errors: list[str] = []
     with _iam_lock:
         # retrieve the IAM server
@@ -264,8 +264,8 @@ def service_logout() -> Response:
 
     # log the request
     if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
-                                                                                      ensure_ascii=False)}")
+        __IAM_LOGGER.debug(msg=__log_init(req=request,
+                                          args=args))
     errors: list[str] = []
     with _iam_lock:
         # retrieve the IAM server
@@ -322,8 +322,8 @@ def service_callback() -> Response:
 
     # log the request
     if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
-                                                                                      ensure_ascii=False)}")
+        __IAM_LOGGER.debug(msg=__log_init(req=request,
+                                          args=args))
     errors: list[str] = []
     token_data: tuple[str, str] | None = None
     with _iam_lock:
@@ -381,8 +381,8 @@ def service_exchange() -> Response:
 
     # log the request
     if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
-                                                                                      ensure_ascii=False)}")
+        __IAM_LOGGER.debug(msg=__log_init(req=request,
+                                          args=args))
     errors: list[str] = []
     with _iam_lock:
         # retrieve the IAM server
@@ -449,8 +449,8 @@ def service_callback_exchange() -> Response:
 
     # log the request
     if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
-                                                                                      ensure_ascii=False)}")
+        __IAM_LOGGER.debug(msg=__log_init(req=request,
+                                          args=args))
     errors: list[str] = []
     with _iam_lock:
         # retrieve the IAM server
@@ -516,8 +516,8 @@ def service_refresh() -> Response:
 
     # log the request
     if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
-                                                                                      ensure_ascii=False)}")
+        __IAM_LOGGER.debug(msg=__log_init(req=request,
+                                          args=args))
     errors: list[str] = []
     token_info: dict[str, str] | None = None
     with _iam_lock:
@@ -576,8 +576,8 @@ def service_token() -> Response:
 
     # log the request
     if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
-                                                                                      ensure_ascii=False)}")
+        __IAM_LOGGER.debug(msg=__log_init(req=request,
+                                          args=args))
     errors: list[str] = []
     token_info: dict[str, str] | None = None
     with _iam_lock:
@@ -591,7 +591,9 @@ def service_token() -> Response:
                                                          attr=ServerParam.TRUSTED_HOSTS,
                                                          errors=None,
                                                          logger=__IAM_LOGGER) or []
-            if not trusted_hosts or request.host in trusted_hosts:
+            remote_addr: str = request.headers.get("X-Forwarded-For",
+                                                   request.remote_addr)
+            if not trusted_hosts or remote_addr in trusted_hosts:
                 # retrieve the token
                 errors: list[str] = []
                 token_info = iam_token(iam_server=iam_server,
@@ -600,7 +602,7 @@ def service_token() -> Response:
                                        logger=__IAM_LOGGER)
             else:
                 if __IAM_LOGGER:
-                    __IAM_LOGGER.error(msg=f"Not authorized: '{request.host}' not a trusted host")
+                    __IAM_LOGGER.error(msg=f"Not authorized: '{remote_addr}' not a trusted host")
                 result = Response(response="Not authorized",
                                   status=401)
     if not result:
@@ -639,8 +641,8 @@ def service_userinfo() -> Response:
 
     # log the request
     if __IAM_LOGGER:
-        __IAM_LOGGER.debug(msg=f"Request {request.method}:{request.path}; {json.dumps(obj=args,
-                                                                                      ensure_ascii=False)}")
+        __IAM_LOGGER.debug(msg=__log_init(req=request,
+                                          args=args))
     # retrieve the bearer token
     args["access-token"] = __get_bearer_token(req=request)
 
@@ -669,3 +671,13 @@ def service_userinfo() -> Response:
         __IAM_LOGGER.debug(msg=f"Response {result}; {json.dumps(obj=user_info,
                                                                 ensure_ascii=False)}")
     return result
+
+
+def __log_init(req: Request,
+               args: dict) -> str:
+
+    origin: str = req.headers.get("X-Forwarded-For",
+                                  req.remote_addr)
+    params: str = json.dumps(obj=args,
+                             ensure_ascii=False)
+    return f"Request {req.method}:{req.path}, {origin}; {params}"
