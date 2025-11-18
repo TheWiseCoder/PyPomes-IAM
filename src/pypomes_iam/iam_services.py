@@ -675,9 +675,15 @@ def service_userinfo() -> Response:
 
 def __log_init(req: Request,
                args: dict) -> str:
+    """
+    Build the information on the start of an HTTP request for logging.
 
+    :param req: the reference HTTP request
+    :param args: the request arguments
+    :return: the information to be written to the log
+    """
     origin: str = req.headers.get("X-Forwarded-For",
                                   req.remote_addr)
     params: str = json.dumps(obj=args,
                              ensure_ascii=False)
-    return f"Request {req.method}:{req.path}, {origin}; {params}"
+    return f"Request {req.method}:{req.path}, from {origin}; {params}"
