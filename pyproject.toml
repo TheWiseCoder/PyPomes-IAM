@@ -21,7 +21,7 @@ classifiers = [
 dependencies = [
     "Flask>=3.1.2",
     "PyJWT>=2.10.1",
-    "pypomes-core>=2.8.6",
+    "pypomes-core>=2.8.7",
     "pypomes-crypto>=0.5.1",
     "requests>=2.32.5"
 ]

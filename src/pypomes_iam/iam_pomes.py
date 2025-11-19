@@ -28,7 +28,7 @@ def iam_setup_server(iam_server: IamServer,
                      trusted_hosts: list[str] = None,
                      url_base: str = None) -> None:
     """
-    Setup the *IAM* server *iam_server*.
+    Configure the *IAM* server *iam_server*.
 
     For the parameters not effectively passed, an attempt is made to obtain a value from the corresponding
     environment variables. Most parameters are required to have values, which must be assigned either
@@ -112,7 +112,7 @@ def iam_setup_endpoints(flask_app: Flask,
                         token_endpoint: str = None,
                         userinfo_endpoint: str = None) -> None:
     """
-    Setup the endpoints for accessing the services provided by *iam_server*.
+    Configure the endpoints for accessing the services provided by *iam_server*.
 
     For the parameters not effectively passed, an attempt is made to obtain a value from the corresponding
     environment variables.

@@ -35,7 +35,7 @@ __all__ = [
     "service_exchange", "service_callback_exchange",
     # provider_pomes
     "IamProvider", "ProviderParam",
-    "service_refresh", "provider_get_token",
+    "service_get_token", "service_refresh", "provider_get_token",
     "iam_setup_provider", "provider_setup_endpoint", "provider_setup_logger",
 ]
 

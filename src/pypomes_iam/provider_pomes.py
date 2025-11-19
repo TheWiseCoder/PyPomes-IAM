@@ -128,7 +128,7 @@ def iam_setup_provider(iam_provider: IamProvider,
                        trusted_hosts: list[str] = None,
                        url_token: str = None) -> None:
     """
-    Setup the *IAM* provider *iam_provider*.
+    Configure the *IAM* provider *iam_provider*.
 
     For the parameters not effectively passed, an attempt is made to obtain a value from the corresponding
     environment variable.
@@ -151,8 +151,6 @@ def iam_setup_provider(iam_provider: IamProvider,
     :param trusted_hosts: one or more hosts allowed to be serviced at the 'get token' endpoint
     :param url_token: the url to request *JWT* tokens with
     """
-    global _provider_registry
-
     # obtain the defaulted parameters
     defaulted_params: list[str] = func_defaulted_params.get()
 
@@ -194,7 +192,7 @@ def iam_setup_provider(iam_provider: IamProvider,
 def provider_setup_endpoint(flask_app: Flask,
                             provider_endpoint: str = None) -> None:
     """
-    Setup the endpoint for requesting token from the registered *JWT* providers.
+    Configure the endpoint for requesting token from the registered *JWT* providers.
 
     if *provider_endpoint* is not effectively passed, an attempt is made to obtain a value from the corresponding
     environment variable.
@@ -212,7 +210,7 @@ def provider_setup_endpoint(flask_app: Flask,
     # establish the endpoints
     if provider_endpoint:
         flask_app.add_url_rule(rule=provider_endpoint,
-                               endpoint=f"provider-token",
+                               endpoint="provider-token",
                                view_func=service_get_token,
                                methods=["GET"])
 
@@ -307,8 +305,6 @@ def provider_get_token(iam_provider: IamProvider,
     :param logger: optional logger
     :return: the JWT token, or *None* if error
     """
-    global _provider_registry
-
     # initialize the return variable
     result: str | None = None
 

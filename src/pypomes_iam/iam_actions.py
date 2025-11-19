@@ -147,7 +147,7 @@ def iam_logout(iam_server: IamServer,
                         if response.status_code in [200, 204]:
                             # request succeeded
                             if logger:
-                                logger.debug(msg=f"POST success")
+                                logger.debug(msg="POST success")
                         else:
                             # request failed, report the problem
                             msg: str = f"POST failure, status {response.status_code}, reason {response.reason}"
@@ -553,6 +553,7 @@ def __assert_link(iam_server: IamServer,
                   logger: Logger | None) -> None:
     """
     Make sure *iam_server* has a link associating *user_id* to an internal user identification.
+
     This is a requirement for exchanging a token issued by a federated *IAM* server for an equivalent
     one from *iam_server*.
 
@@ -855,7 +856,7 @@ def __post_json(url: str,
             if isinstance(errors, list):
                 errors.append(msg)
         elif logger:
-            logger.debug(msg=f"POST success")
+            logger.debug(msg="POST success")
     except Exception as e:
         # the operation raised an exception
         msg = exc_format(exc=e,
@@ -1104,7 +1105,7 @@ def __validate_and_store(iam_server: IamServer,
     result: tuple[str, str] | None = None
 
     if logger:
-        logger.debug(msg=f"Validating and storing the token")
+        logger.debug(msg="Validating and storing the token")
     with _iam_lock:
         # retrieve the IAM server's registry
         registry: dict[str, Any] = _get_iam_registry(iam_server=iam_server,

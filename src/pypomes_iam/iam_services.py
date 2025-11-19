@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from flask import Request, Response, request, jsonify
 from pypomes_crypto import jwt_get_claim, jwt_validate
 from logging import Logger
@@ -19,7 +20,7 @@ from .iam_actions import (
 __IAM_LOGGER: Logger | None = None
 
 
-def jwt_required(func: callable) -> callable:
+def jwt_required(func: Callable) -> Callable:
     """
     Create a decorator to authenticate service endpoints with JWT tokens.
 
