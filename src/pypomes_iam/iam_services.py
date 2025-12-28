@@ -32,7 +32,7 @@ def jwt_required(func: Callable) -> Callable:
     # ruff: noqa: ANN003 - Missing type annotation for *{name}
     def wrapper(*args, **kwargs) -> Response:
         response: Response = __request_validate(req=request)
-        return response if response else func(*args, **kwargs)
+        return response if response is not None else func(*args, **kwargs)
 
     # prevent a rogue error ("View function mapping is overwriting an existing endpoint function")
     wrapper.__name__ = func.__name__
@@ -40,7 +40,7 @@ def jwt_required(func: Callable) -> Callable:
     return wrapper
 
 
-def __request_validate(req: Request) -> Response:
+def __request_validate(req: Request) -> Response | None:
     """
     Verify whether the HTTP *request* has the proper authorization, as per the JWT standard.
 

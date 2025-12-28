@@ -149,7 +149,7 @@ def iam_setup_provider(iam_provider: IamProvider,
     :param header_data: optional key-value pairs to be added to the request headers
     :param body_data: optional key-value pairs to be added to the request body
     :param trusted_hosts: one or more hosts allowed to be serviced at the 'get token' endpoint
-    :param url_token: the url to request *JWT* tokens with
+    :param url_token: the url for requesting *JWT* tokens from *iam_provider*
     """
     # obtain the defaulted parameters
     defaulted_params: list[str] = func_defaulted_params.get()
@@ -190,14 +190,18 @@ def iam_setup_provider(iam_provider: IamProvider,
 
 @func_capture_params
 def provider_setup_endpoint(flask_app: Flask,
+                            iam_provider: IamProvider,
                             provider_endpoint: str = None) -> None:
     """
-    Configure the endpoint for requesting token from the registered *JWT* providers.
+    Configure the endpoint for requesting tokens from the registered *JWT* provider *iam_provider*.
 
-    if *provider_endpoint* is not effectively passed, an attempt is made to obtain a value from the corresponding
-    environment variable.
+    The same function *service_get_token()* is assigned to the endpoints of all providers,
+    the distinction being made by identifying the endpoint as *<iam-provider>-token*.
+    If *provider_endpoint* is not effectively passed, an attempt is made to obtain a value
+    from the corresponding environment variable.
 
     :param flask_app: the Flask application
+    :param iam_provider: the provider's identification
     :param provider_endpoint: endpoint for requenting tokens to provider
     """
     # obtain the defaulted parameters
@@ -205,12 +209,12 @@ def provider_setup_endpoint(flask_app: Flask,
 
     # read from the environment variable
     if "provider_endpoint" in defaulted_params:
-        provider_endpoint = env_get_str(key=f"{APP_PREFIX}_PROVIDER_ENDPOINT_TOKEN")
+        provider_endpoint = env_get_str(key=f"{APP_PREFIX}_{iam_provider.name}_ENDPOINT_TOKEN")
 
-    # establish the endpoints
+    # establish the endpoint
     if provider_endpoint:
         flask_app.add_url_rule(rule=provider_endpoint,
-                               endpoint="provider-token",
+                               endpoint=f"{iam_provider}-token",
                                view_func=service_get_token,
                                methods=["GET"])
 
@@ -225,13 +229,13 @@ def provider_setup_logger(logger: Logger) -> None:
     __JWT_LOGGER = logger
 
 
-# @flask_app.route(rule=<token_endpoint>,
+# @flask_app.route(rule=<token-endpoint>,
 #                  methods=["GET"])
 def service_get_token() -> Response:
     """
     Entry point for retrieving a token from the *JWT* provider.
 
-    The provider is identified by the request parameter *jwt-provider*.
+    The provider is identified by the endpoint identification *<iam-provider>-token*.
 
     On success, the returned *Response* will contain the following JSON:
         {
@@ -254,8 +258,8 @@ def service_get_token() -> Response:
                                  ensure_ascii=False)
         __JWT_LOGGER.debug(msg=f"Request {request.method}:{request.path}, {origin}; {params}")
 
-    # obtain the provider JWT
-    provider_id: str = args.get("iam-provider")
+    # obtain the JWT provider
+    provider_id: str = request.endpoint.replace("-token", "")
     iam_provider: IamProvider = IamProvider(provider_id) if provider_id in IamProvider else None
 
     # retrieve the token
@@ -267,8 +271,7 @@ def service_get_token() -> Response:
                                                request.remote_addr)
         if not trusted_hosts or remote_addr in trusted_hosts:
             token: str = provider_get_token(iam_provider=iam_provider,
-                                            errors=errors,
-                                            logger=__JWT_LOGGER)
+                                            errors=errors)
         else:
             if __JWT_LOGGER:
                 __JWT_LOGGER.error(msg=f"Not authorized: '{remote_addr}' not a trusted host")
@@ -295,14 +298,12 @@ def service_get_token() -> Response:
 
 
 def provider_get_token(iam_provider: IamProvider,
-                       errors: list[str] = None,
-                       logger: Logger = None) -> str | None:
+                       errors: list[str] = None) -> str | None:
     """
     Obtain an JWT token from the external provider *provider_id*.
 
     :param iam_provider: the provider's identification
     :param errors: incidental error messages
-    :param logger: optional logger
     :return: the JWT token, or *None* if error
     """
     # initialize the return variable
@@ -351,8 +352,7 @@ def provider_get_token(iam_provider: IamProvider,
                 token_data: dict[str, Any] = __post_for_token(url=url,
                                                               header_data=header_data,
                                                               body_data=body_data,
-                                                              errors=errors,
-                                                              logger=logger)
+                                                              errors=errors)
                 if token_data:
                     result = token_data.get("access_token")
                     provider[ProviderParam.ACCESS_TOKEN] = result
@@ -364,10 +364,10 @@ def provider_get_token(iam_provider: IamProvider,
                         provider[ProviderParam.REFRESH_EXPIRATION] = (now + refresh_exp) \
                             if refresh_exp else sys.maxsize
 
-        elif logger or isinstance(errors, list):
+        else:
             msg: str = f"Unknown provider '{iam_provider}'"
-            if logger:
-                logger.error(msg=msg)
+            if __JWT_LOGGER:
+                __JWT_LOGGER.error(msg=msg)
             if isinstance(errors, list):
                 errors.append(msg)
 
@@ -377,8 +377,7 @@ def provider_get_token(iam_provider: IamProvider,
 def __post_for_token(url: str,
                      header_data: dict[str, str],
                      body_data: dict[str, Any],
-                     errors: list[str] | None,
-                     logger: Logger | None) -> dict[str, Any] | None:
+                     errors: list[str] | None) -> dict[str, Any] | None:
     """
     Send a *POST* request to *url* and return the token data obtained.
 
@@ -401,16 +400,15 @@ def __post_for_token(url: str,
     :param header_data: the data to send in the header of the request
     :param body_data: the data to send in the body of the request
     :param errors: incidental errors
-    :param logger: optional logger
     :return: the token data, or *None* if error
     """
     # initialize the return variable
     result: dict[str, Any] | None = None
 
     # log the POST
-    if logger:
-        logger.debug(msg=f"POST {url}, {json.dumps(obj=body_data,
-                                                   ensure_ascii=False)}")
+    if __JWT_LOGGER:
+        __JWT_LOGGER.debug(msg=f"POST {url}, {json.dumps(obj=body_data,
+                                                         ensure_ascii=False)}")
     try:
         response: requests.Response = requests.post(url=url,
                                                     data=body_data,
@@ -419,16 +417,16 @@ def __post_for_token(url: str,
         if response.status_code == 200:
             # request succeeded
             result = response.json()
-            if logger:
-                logger.debug(msg=f"POST success, status {response.status_code}")
+            if __JWT_LOGGER:
+                __JWT_LOGGER.debug(msg=f"POST success, status {response.status_code}")
         else:
             # request failed, report the problem
             msg: str = (f"POST failure, "
                         f"status {response.status_code}, reason {response.reason}")
             if hasattr(response, "content") and response.content:
                 msg += f", content '{response.content}'"
-            if logger:
-                logger.error(msg=msg)
+            if __JWT_LOGGER:
+                __JWT_LOGGER.error(msg=msg)
             if isinstance(errors, list):
                 errors.append(msg)
     except Exception as e:
@@ -436,8 +434,8 @@ def __post_for_token(url: str,
         err_msg = exc_format(exc=e,
                              exc_info=sys.exc_info())
         msg: str = f"POST error, {err_msg}"
-        if logger:
-            logger.debug(msg=msg)
+        if __JWT_LOGGER:
+            __JWT_LOGGER.debug(msg=msg)
         if isinstance(errors, list):
             errors.append(msg)
 

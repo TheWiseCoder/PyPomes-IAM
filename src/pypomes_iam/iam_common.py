@@ -251,6 +251,7 @@ def _get_public_key(iam_server: IamServer,
         if now > registry[ServerParam.PK_EXPIRATION]:
             # obtain the public key from the token issuer
             issuer: str = f"{registry[ServerParam.URL_BASE]}/realms/{registry[ServerParam.CLIENT_REALM]}"
+            # noinspection PyArgumentEqualDefault
             registry[ServerParam.PUBLIC_KEY] = jwt_get_public_key(issuer=issuer,
                                                                   fmt="PEM",
                                                                   errors=errors,
