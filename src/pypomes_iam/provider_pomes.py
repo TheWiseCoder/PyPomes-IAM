@@ -202,7 +202,7 @@ def provider_setup_endpoint(flask_app: Flask,
 
     :param flask_app: the Flask application
     :param iam_provider: the provider's identification
-    :param provider_endpoint: endpoint for requenting tokens to provider
+    :param provider_endpoint: endpoint for requesting tokens to provider
     """
     # obtain the defaulted parameters
     defaulted_params: list[str] = func_defaulted_params.get()

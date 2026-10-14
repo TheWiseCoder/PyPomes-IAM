@@ -10,17 +10,15 @@ from pypomes_crypto import jwt_get_public_key
 from threading import RLock
 from typing import Any, Final
 
-_members: dict[str, str] = {key.upper(): key.lower() for key in
-                            env_get_strs(key=f"{APP_PREFIX}_AUTH_SERVERS")}
-IamServer: type[StrEnum] = StrEnum("IamServer", _members)
-del _members
+IamServer: type[StrEnum] = StrEnum("IamServer",
+                                   {key.upper(): key.lower()
+                                    for key in env_get_strs(key=f"{APP_PREFIX}_AUTH_SERVERS")} or {})
 
 
 class ServerParam(StrEnum):
     """
     Parameters for configuring *IAM* servers.
     """
-
     ADMIN_ID = "admin-id"
     ADMIN_SECRET = "admin-secret"
     CLIENT_ID = "client-id"
@@ -69,8 +67,8 @@ def __get_iam_data() -> dict[IamServer, dict[ServerParam, Any]]:
     1. Specify *<APP_PREFIX>_AUTH_SERVERS* with a list of names among the values found in *IamServer* class
        and the data set below for each server, where *<IAM>* stands for the server's name as presented in
        *IamServer* class:
-          - *<APP_PREFIX>_<IAM>_ADMIN_ID*           (optional, required if administrative duties are performed)
-          - *<APP_PREFIX>_<IAM>_ADMIN_PWD*          (optional, required if administrative duties are performed)
+          - *<APP_PREFIX>_<IAM>_ADMIN_ID*           (optional, required if administrative chores are performed)
+          - *<APP_PREFIX>_<IAM>_ADMIN_SECRET*       (optional, required if administrative chores are performed)
           - *<APP_PREFIX>_<IAM>_CLIENT_ID*          (required)
           - *<APP_PREFIX>_<IAM>_CLIENT_REALM*       (required)
           - *<APP_PREFIX>_<IAM>_CLIENT_SECRET*      (required)
