@@ -10,9 +10,10 @@ from pypomes_crypto import jwt_get_public_key
 from threading import RLock
 from typing import Any, Final
 
-IamServer: type[StrEnum] = StrEnum("IamServer",
-                                   {key.upper(): key.lower()
-                                    for key in env_get_strs(key=f"{APP_PREFIX}_AUTH_SERVERS") or []})
+_members: dict[str, str] = {key.upper(): key.lower() for key in
+                            env_get_strs(key=f"{APP_PREFIX}_AUTH_SERVERS") or []}
+IamServer: type[StrEnum] = StrEnum("IamServer", _members)
+del _members
 
 
 class ServerParam(StrEnum):

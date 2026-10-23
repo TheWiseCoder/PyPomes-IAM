@@ -15,7 +15,7 @@ from threading import Lock
 from typing import Any, Final
 
 _members: dict[str, str] = {key.upper(): key.lower() for key in
-                            env_get_strs(key=f"{APP_PREFIX}_AUTH_PROVIDERS")}
+                            env_get_strs(key=f"{APP_PREFIX}_AUTH_PROVIDERS") or []}
 IamProvider: type[StrEnum] = StrEnum("IamProvider", _members)
 del _members
 
