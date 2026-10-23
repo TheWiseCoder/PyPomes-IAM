@@ -12,7 +12,7 @@ from typing import Any, Final
 
 IamServer: type[StrEnum] = StrEnum("IamServer",
                                    {key.upper(): key.lower()
-                                    for key in env_get_strs(key=f"{APP_PREFIX}_AUTH_SERVERS")} or {})
+                                    for key in env_get_strs(key=f"{APP_PREFIX}_AUTH_SERVERS") or []})
 
 
 class ServerParam(StrEnum):
